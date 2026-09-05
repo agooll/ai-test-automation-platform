@@ -9,6 +9,7 @@ import pytest
 
 from testteller.agent_runtime.sandbox.artifacts import ArtifactExtractor
 from testteller.agent_runtime.sandbox.lifecycle import ContainerLifecycleManager
+from testteller.agent_runtime.sandbox.network import IsolatedTargetNetwork
 from testteller.agent_runtime.sandbox.policy import NetworkPolicy, SandboxPolicy
 from testteller.agent_runtime.sandbox.workspace import PerRunWorkspace
 from testteller.agent_runtime.tools.execution import (
@@ -197,6 +198,34 @@ def test_network_policy_target_only(tmp_path: Path):
     assert "--network=custom-test-net" in args
     assert "--add-host" in args
     assert "target:192.168.1.100" in args
+
+
+def test_isolated_target_network_lifecycle():
+    calls = []
+    def mock_runner(cmd, **kwargs):
+        calls.append(list(cmd))
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = ""
+        mock_proc.stderr = ""
+        return mock_proc
+
+    with IsolatedTargetNetwork(network_name="bench_internal", runner_func=mock_runner) as net:
+        target_name = net.attach_target_container(
+            image="target-service:v1",
+            container_name="my_target",
+            env={"PORT": "8080"},
+        )
+        assert target_name == "my_target"
+
+    assert calls[0] == ["docker", "network", "create", "--internal", "bench_internal"]
+    assert calls[1][:5] == ["docker", "run", "-d", "--name", "my_target"]
+    assert "--network" in calls[1]
+    assert "bench_internal" in calls[1]
+    assert "--network-alias" in calls[1]
+    assert "target-app" in calls[1]
+    assert calls[2] == ["docker", "rm", "-f", "my_target"]
+    assert calls[3] == ["docker", "network", "rm", "bench_internal"]
 
 
 # ============================================================================

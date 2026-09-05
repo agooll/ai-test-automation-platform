@@ -12,6 +12,7 @@ from .execution import (
 from .artifacts import WorkspaceArtifacts
 from ..sandbox.artifacts import ArtifactExtractor
 from ..sandbox.lifecycle import ContainerLifecycleManager
+from ..sandbox.network import IsolatedTargetNetwork
 from ..sandbox.policy import NetworkPolicy, SandboxPolicy
 from ..sandbox.workspace import PerRunWorkspace
 
@@ -21,6 +22,7 @@ __all__ = [
     "BaseTestExecutor",
     "ContainerLifecycleManager",
     "DockerSandboxExecutor",
+    "IsolatedTargetNetwork",
     "LocalSubprocessExecutor",
     "NetworkPolicy",
     "PerRunWorkspace",

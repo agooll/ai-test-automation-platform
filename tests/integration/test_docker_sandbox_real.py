@@ -10,6 +10,7 @@ import subprocess
 
 import pytest
 
+from testteller.agent_runtime.sandbox.network import IsolatedTargetNetwork
 from testteller.agent_runtime.sandbox.policy import NetworkPolicy, SandboxPolicy
 from testteller.agent_runtime.tools.artifacts import WorkspaceArtifacts
 from testteller.agent_runtime.tools.execution import (
@@ -171,3 +172,43 @@ def test_infinite_loop():
             check=False,
         )
         assert container_name not in (check_res.stdout or "")
+
+
+def test_real_docker_target_only_closed_loop(tmp_path: Path):
+    """Verify TARGET_ONLY internal network connects runner strictly to target container."""
+    net_name = f"test_net_{tmp_path.name[:8]}"
+    with IsolatedTargetNetwork(network_name=net_name) as net:
+        # Start a lightweight HTTP server as target-app container
+        net.attach_target_container(
+            image="python:3.11-slim",
+            container_name=f"target_{tmp_path.name[:8]}",
+            command=["python", "-m", "http.server", "8000"],
+        )
+
+        WorkspaceArtifacts(tmp_path).write_files({
+            "test_target.py": """
+import httpx
+import pytest
+
+def test_reach_target_app():
+    # Calling target-app inside the internal network succeeds
+    res = httpx.get("http://target-app:8000", timeout=5)
+    assert res.status_code == 200
+
+def test_cannot_reach_external_internet():
+    # Calling external internet is strictly blocked by --internal
+    with pytest.raises(Exception):
+        httpx.get("http://1.1.1.1", timeout=2)
+""",
+        })
+
+        policy = SandboxPolicy(
+            network_policy=NetworkPolicy.TARGET_ONLY,
+            target_network=net_name,
+            timeout_seconds=30,
+        )
+        executor = DockerSandboxExecutor(workspace_root=tmp_path, policy=policy)
+        result = executor.run(["python", "-m", "pytest", "-q"], framework="pytest")
+
+        assert result["passed"] is True
+        assert result["exit_code"] == 0
