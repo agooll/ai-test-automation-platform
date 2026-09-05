@@ -1,0 +1,81 @@
+﻿name: Stage 3 Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Benchmark Execution Mode"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - dry-run
+          - baseline
+          - all
+      model:
+        description: "Gemini Model Name"
+        required: true
+        default: "gemini-2.5-pro"
+        type: string
+
+jobs:
+  benchmark:
+    name: "Stage 3 Benchmark (${{ inputs.mode }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpoppler-cpp-dev tesseract-ocr git
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+          pip install -e .
+
+      - name: Verify Docker Daemon
+        run: |
+          docker info
+          docker version
+
+      - name: Build Runner Docker Images
+        run: |
+          python docker/build_runners.py
+          docker images | grep testteller-runner
+
+      - name: Run Benchmark (${{ inputs.mode }})
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          bash scripts/run_benchmark_linux.sh "${{ inputs.mode }}" "${{ inputs.model }}"
+
+      - name: Upload Benchmark Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage3-benchmark-reports-${{ inputs.mode }}
+          path: evals/reports/
+          retention-days: 30
+
+      - name: Publish Benchmark Summary to Job
+        if: always()
+        run: |
+          LATEST_REPORT=$(find evals/reports -maxdepth 1 -type d -name "*_20*" | sort -r | head -n 1)
+          if [ -d "$LATEST_REPORT" ] && [ -f "$LATEST_REPORT/report.md" ]; then
+            echo "## 📊 Benchmark Report (${{ inputs.mode }})" >> $GITHUB_STEP_SUMMARY
+            cat "$LATEST_REPORT/report.md" >> $GITHUB_STEP_SUMMARY
+          fi
