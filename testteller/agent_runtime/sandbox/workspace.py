@@ -76,6 +76,23 @@ class PerRunWorkspace:
                 else:
                     shutil.copy2(item, dest)
 
+        # Ensure container runner user (UID 1000) has full read/write access on Linux hosts
+        try:
+            os.chmod(self.staging_dir, 0o777)
+            for root, dirs, files in os.walk(self.staging_dir):
+                for d in dirs:
+                    try:
+                        os.chmod(os.path.join(root, d), 0o777)
+                    except Exception:
+                        pass
+                for f in files:
+                    try:
+                        os.chmod(os.path.join(root, f), 0o666)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         logger.debug("Created isolated staging workspace at %s", self.staging_dir)
         return self
 
