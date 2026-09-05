@@ -246,12 +246,33 @@ async def index() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "provider": os.getenv("LLM_PROVIDER", "gemini")}
+    provider = os.getenv("LLM_PROVIDER", "gemini")
+    key_configured = bool(
+        os.getenv("GOOGLE_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or os.getenv("CLAUDE_API_KEY")
+        or os.getenv("OLLAMA_BASE_URL")
+    )
+    return {
+        "status": "ok",
+        "provider": provider,
+        "api_key_configured": key_configured,
+    }
 
 
 @app.post("/api/status")
 async def status(request: CollectionRequest) -> dict:
-    agent = _agent(request.collection_name)
+    try:
+        agent = _agent(request.collection_name)
+    except Exception as error:
+        logger.warning("Could not initialize TestTellerAgent for status: %s", error)
+        return {
+            "collection_name": request.collection_name,
+            "count": 0,
+            "provider": os.getenv("LLM_PROVIDER", "gemini"),
+            "storage": "local ChromaDB",
+            "warning": f"LLM API Key 未配置（请在 .env 中配置，例如 GOOGLE_API_KEY）: {error}",
+        }
     try:
         count = await agent.get_ingested_data_count()
         return {
@@ -260,8 +281,18 @@ async def status(request: CollectionRequest) -> dict:
             "provider": agent.llm_manager.provider,
             "storage": agent.vector_store.db_path if not agent.vector_store.use_remote else "remote ChromaDB",
         }
+    except Exception as error:
+        logger.warning("Error fetching collection count: %s", error)
+        return {
+            "collection_name": request.collection_name,
+            "count": 0,
+            "provider": agent.llm_manager.provider,
+            "storage": "local ChromaDB",
+            "warning": str(error),
+        }
     finally:
         agent.close()
+
 
 
 @app.post("/api/ingest-docs")

@@ -71,7 +71,13 @@
     };
     if (body) options.body = JSON.stringify(body);
     const res = await fetch(url, options);
-    const data = await res.json();
+    let data;
+    const text = await res.text();
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { detail: text || `服务错误 (${res.status})` };
+    }
     if (!res.ok) {
       throw new Error(data.detail || `请求失败 (${res.status})`);
     }
@@ -96,7 +102,8 @@
       const data = await apiRequest("/api/health");
       const healthDiv = healthDot?.parentElement;
       if (healthDiv) healthDiv.className = "health online";
-      if (healthText) healthText.textContent = `在线 (${data.provider})`;
+      const keyTip = data.api_key_configured ? "" : " (未配置 API Key)";
+      if (healthText) healthText.textContent = `在线: ${data.provider}${keyTip}`;
     } catch {
       const healthDiv = healthDot?.parentElement;
       if (healthDiv) healthDiv.className = "health";
@@ -110,10 +117,14 @@
     try {
       const data = await apiRequest("/api/status", "POST", { collection_name: col });
       if (docCount) docCount.textContent = data.count ?? 0;
+      if (data.warning) {
+        showToast(data.warning, 6000);
+      }
     } catch (e) {
       showToast(e.message);
     }
   }
+
 
   // -------------------------------------------------------------
   // Context Ingestion
