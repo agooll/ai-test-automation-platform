@@ -1,0 +1,131 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+output/
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.agents/
+.codex/
+
+# Environment variables
+.env
+.env.backup*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ChromaDB data
+chroma_data/
+chroma_data_*/
+*.sqlite3
+
+# Temporary files
+temp_cloned_repos/
+*.tmp
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test outputs
+test_*/
+testteller-testcases.md
+test_automation_cases.md
+test_registration_cases.md
+test_sample.md
+testteller_generated_tests/
+testteller_automated_tests/
+
+
+# Development artifacts
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Generated files
+sample-outputs/automated-output/*/
+*.pyc
+*.pyo
+*.pyd
+
+# Documentation builds
+docs/_build/
+site/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Local development
+local_*/
+iavipro/
+.claude/
+testteller_generated_tests/
+testteller_automated_tests/
+testteller_cli*
+EOF < /dev/null

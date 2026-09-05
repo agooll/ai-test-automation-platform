@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Development tools
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test outputs
+htmlcov/
+.coverage
+.pytest_cache/
+.tox/
+coverage.xml
+*.cover
+.hypothesis/
+tests/
+pytest.ini
+requirements-test.txt
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Temporary files and data
+temp_cloned_repos/
+chroma_data/
+chroma_data_prod/
+testteller_generated_tests/
+testteller_automated_tests/
+sample-outputs/
+*.tmp
+*.log
+
+# Documentation (keep only essential)
+docs/
+iavipro/
+*.md
+!README.md
+!MANIFEST.in
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+*.sublime-*
+.vscode/
+.idea/
+
+# Development files
+.pre-commit-config.yaml
+.github/
+tox.ini
+setup.cfg
+test.env
+docker-compose.test.yml
+docker-test.sh
+DOCKER_TEST_CHECKLIST.md
+
+# Optimization files
+Dockerfile.optimized
+docker/

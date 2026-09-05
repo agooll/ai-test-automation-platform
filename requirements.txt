@@ -1,0 +1,33 @@
+# Core LLM and AI dependencies
+google-generativeai>=0.3.0
+chromadb==0.4.22
+numpy==1.26.4
+langchain>=0.1.0
+langgraph>=1.0.0
+langgraph-checkpoint-sqlite>=3.0.0
+langchain-google-genai>=1.0.0
+openai>=1.0.0
+anthropic>=0.8.0
+tiktoken>=0.5.0
+
+# Document processing
+python-docx>=0.8.11
+PyMuPDF>=1.23.0
+openpyxl>=3.1.0
+markdown>=3.5.0
+weasyprint>=60.0
+
+# Code and Git integration
+GitPython>=3.1.0
+
+# CLI and configuration
+typer>=0.9.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Utilities and logging
+tenacity>=8.0.0
+python-json-logger>=2.0.0
+aiofiles>=23.0.0
+httpx>=0.24.0

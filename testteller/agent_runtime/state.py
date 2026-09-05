@@ -1,0 +1,32 @@
+"""Typed state shared by the LangGraph test-agent workflow."""
+
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+
+class AgentState(TypedDict, total=False):
+    task_id: str
+    requirement: str
+    language: str
+    framework: str
+    workspace: str
+    test_command: list[str]
+    test_plan: dict[str, Any]
+    retrieved_context: list[dict[str, Any]]
+    generated_files: dict[str, str]
+    generation_success: bool
+    execution_result: dict[str, Any]
+    first_execution_result: dict[str, Any]
+    execution_success: bool
+    repair_success: bool
+    failure_analysis: dict[str, Any]
+    repair_round: int
+    max_repair_rounds: int
+    final_verdict: str
+    review: dict[str, Any]
+    human_review: bool
+    human_decision: str
+    trace: list[dict[str, Any]]
+    trace_path: str
+    error: str | None

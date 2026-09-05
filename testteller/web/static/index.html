@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TestTeller Console</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">LOCAL RAG TEST WORKBENCH</p>
+          <h1>TestTeller<br><em>Console</em></h1>
+        </div>
+        <div class="health"><span id="health-dot"></span><span id="health-text">正在连接本地服务</span></div>
+      </header>
+
+      <section class="control-strip">
+        <label>知识库 Collection
+          <input id="collection" value="zhipu_acceptance" maxlength="80">
+        </label>
+        <button class="button light" id="refresh-status">刷新状态</button>
+        <div class="stat"><b id="document-count">-</b><span>已入库 chunks</span></div>
+      </section>
+
+      <section class="grid">
+        <article class="card ingest-card">
+          <p class="card-index">01 / CONTEXT</p>
+          <h2>输入项目知识</h2>
+          <p>将需求文档、接口说明或项目源码放入当前 collection。</p>
+          <label>文档或目录路径
+            <input id="docs-path" placeholder="D:\workspace\requirements">
+          </label>
+          <button class="button" id="ingest-docs">文档入库</button>
+          <div class="rule"></div>
+          <label>本地目录或 Git 仓库地址
+            <input id="code-path" placeholder="D:\workspace\service 或 https://...git">
+          </label>
+          <button class="button outline" id="ingest-code">代码入库</button>
+        </article>
+
+        <article class="card generate-card">
+          <p class="card-index">02 / GENERATE</p>
+          <h2>生成测试用例</h2>
+          <p>先由混合检索提取相关上下文，再调用已配置的模型生成测试用例。</p>
+          <label>测试需求
+            <textarea id="query" rows="7" placeholder="例如：为登录功能生成正常登录、密码错误、账户锁定和权限校验测试用例。"></textarea>
+          </label>
+          <div class="generate-actions">
+            <label class="compact">检索数量
+              <input id="result-limit" type="number" value="5" min="1" max="20">
+            </label>
+            <button class="button primary" id="generate">开始生成 <span>→</span></button>
+          </div>
+        </article>
+      </section>
+
+      <section class="result-panel">
+        <div class="result-head">
+          <div><p class="card-index">03 / OUTPUT</p><h2>生成结果</h2></div>
+          <button class="button light" id="copy-result">复制结果</button>
+        </div>
+        <pre id="result">等待输入测试需求。</pre>
+      </section>
+    </main>
+    <div id="toast" role="status"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
