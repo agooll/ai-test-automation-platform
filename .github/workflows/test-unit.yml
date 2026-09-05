@@ -82,6 +82,19 @@ jobs:
         docker images | grep testteller-runner
 
     - name: Run Real Docker Sandbox Integration Tests
+      id: run_tests
+      continue-on-error: true
       run: |
-        pytest tests/integration/test_docker_sandbox_real.py -v -s
+        pytest tests/integration/test_docker_sandbox_real.py -v -s --tb=short | tee test_output.log
+
+    - name: Publish Test Summary
+      if: always()
+      run: |
+        echo "### Docker Sandbox Integration Test Output" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        cat test_output.log >> $GITHUB_STEP_SUMMARY || true
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        if [ "${{ steps.run_tests.outcome }}" != "success" ]; then
+          exit 1
+        fi
  

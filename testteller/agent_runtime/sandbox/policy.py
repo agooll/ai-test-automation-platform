@@ -35,6 +35,7 @@ class SandboxPolicy:
         default_factory=lambda: {
             "/tmp": "rw,noexec,nosuid,size=64m",
             "/run": "rw,noexec,nosuid,size=16m",
+            "/home/runner": "rw,nosuid,size=64m",
         }
     )
     user: str = "1000:1000"
@@ -44,8 +45,10 @@ class SandboxPolicy:
     default_env_vars: dict[str, str] = field(
         default_factory=lambda: {
             "PYTHONUNBUFFERED": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "TESTTELLER_SANDBOX": "1",
             "CI": "1",
+            "HOME": "/home/runner",
         }
     )
     isolate_workspace: bool = True
