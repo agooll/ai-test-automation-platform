@@ -28,6 +28,8 @@ class AgentState(TypedDict, total=False):
     human_review: bool
     human_decision: str
     repair_history: list[dict[str, Any]]
+    execution_backend: str
     trace: list[dict[str, Any]]
     trace_path: str
     error: str | None
+

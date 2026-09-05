@@ -38,6 +38,8 @@ class AgentRunConfig:
     checkpoint_file: Optional[str] = None
     task_id: Optional[str] = None
     event_sink: Optional[EventSink] = None
+    execution_backend: str = "auto"
+
 
 
 @dataclass
@@ -108,6 +110,7 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         llm_manager=llm_manager,
         checkpoint_path=checkpoint_path,
         event_sink=config.event_sink,
+        execution_backend=config.execution_backend,
     )
 
     initial_state: AgentState = {
@@ -121,7 +124,9 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         "trace_path": str(trace_path),
         "human_review": config.human_review,
         "repair_history": [],
+        "execution_backend": config.execution_backend,
     }
+
 
     return PreparedAgentRun(
         task_id=task_id,

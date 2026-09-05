@@ -1,72 +1,41 @@
-"""Safe, bounded execution of generated test projects."""
+"""Safe, bounded execution of generated test projects with Local and Docker backends."""
 
 from __future__ import annotations
 
+import abc
+import logging
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import time
-from pathlib import Path
 from typing import Any, Sequence
 
+logger = logging.getLogger(__name__)
 
-class SafeTestExecutor:
-    """Run only approved test commands inside a designated workspace."""
 
-    DEFAULT_ALLOWED = {
-        "pytest": {"pytest", "python", "py"},
-        "jest": {"jest", "npx", "npm", "node"},
-        "playwright": {"pytest", "npx", "playwright"},
-        "maven": {"mvn", "mvnw", "mvnw.cmd"},
-    }
+class BaseTestExecutor(abc.ABC):
+    """Abstract base class for test execution environments."""
 
-    def __init__(self, workspace_root: str | Path, timeout_seconds: int = 120,
-                 max_output_chars: int = 30_000) -> None:
+    def __init__(
+        self,
+        workspace_root: str | Path,
+        timeout_seconds: int = 120,
+        max_output_chars: int = 30_000,
+    ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.timeout_seconds = timeout_seconds
         self.max_output_chars = max_output_chars
 
-    def run(self, command: Sequence[str], cwd: str | Path | None = None,
-            framework: str = "pytest") -> dict[str, Any]:
-        if not command:
-            raise ValueError("Test command cannot be empty")
-        workdir = (Path(cwd) if cwd else self.workspace_root).resolve()
-        self._ensure_inside(workdir)
-        executable = Path(str(command[0])).name.lower()
-        allowed = {item.lower() for item in self.DEFAULT_ALLOWED.get(framework.lower(), set())}
-        if executable not in allowed:
-            raise ValueError(f"Command is not allowed for {framework}: {command[0]}")
-        self._validate_arguments([str(item) for item in command], framework.lower())
-
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                [str(item) for item in command], cwd=workdir, env=env,
-                capture_output=True, text=True, timeout=self.timeout_seconds,
-                shell=False, check=False,
-            )
-            timed_out = False
-            return_code = completed.returncode
-            stdout, stderr = completed.stdout, completed.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            return_code = None
-            stdout = self._text(exc.stdout)
-            stderr = self._text(exc.stderr) + "\n[timeout]"
-
-        output = (stdout or "")[-self.max_output_chars:]
-        error_output = (stderr or "")[-self.max_output_chars:]
-        return {
-            "passed": return_code == 0 and not timed_out,
-            "exit_code": return_code,
-            "timed_out": timed_out,
-            "command": list(command),
-            "cwd": str(workdir),
-            "stdout": output,
-            "stderr": error_output,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-        }
+    @abc.abstractmethod
+    def run(
+        self,
+        command: Sequence[str],
+        cwd: str | Path | None = None,
+        framework: str = "pytest",
+    ) -> dict[str, Any]:
+        """Run the test command and return standardized execution result dictionary."""
+        raise NotImplementedError
 
     def _ensure_inside(self, path: Path) -> None:
         try:
@@ -82,6 +51,71 @@ class SafeTestExecutor:
             return ""
         return value.decode(errors="replace") if isinstance(value, bytes) else value
 
+
+class LocalSubprocessExecutor(BaseTestExecutor):
+    """Run approved test commands locally inside the designated workspace."""
+
+    DEFAULT_ALLOWED = {
+        "pytest": {"pytest", "python", "py", "pytest.exe", "python.exe", "py.exe"},
+        "jest": {"jest", "npx", "npm", "node", "jest.cmd", "npx.cmd", "npm.cmd", "node.exe"},
+        "playwright": {"pytest", "npx", "playwright", "npx.cmd", "playwright.cmd"},
+        "maven": {"mvn", "mvnw", "mvnw.cmd"},
+    }
+
+    def run(
+        self,
+        command: Sequence[str],
+        cwd: str | Path | None = None,
+        framework: str = "pytest",
+    ) -> dict[str, Any]:
+        if not command:
+            raise ValueError("Test command cannot be empty")
+        workdir = (Path(cwd) if cwd else self.workspace_root).resolve()
+        self._ensure_inside(workdir)
+
+        executable = Path(str(command[0])).name.lower()
+        allowed = {item.lower() for item in self.DEFAULT_ALLOWED.get(framework.lower(), set())}
+        if executable not in allowed:
+            raise ValueError(f"Command is not allowed for {framework}: {command[0]}")
+        self._validate_arguments([str(item) for item in command], framework.lower())
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                [str(item) for item in command],
+                cwd=workdir,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                shell=False,
+                check=False,
+            )
+            timed_out = False
+            return_code = completed.returncode
+            stdout, stderr = completed.stdout, completed.stderr
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            return_code = None
+            stdout = self._text(exc.stdout)
+            stderr = self._text(exc.stderr) + "\n[timeout]"
+
+        output = (stdout or "")[-self.max_output_chars :]
+        error_output = (stderr or "")[-self.max_output_chars :]
+        return {
+            "passed": return_code == 0 and not timed_out,
+            "exit_code": return_code,
+            "timed_out": timed_out,
+            "command": list(command),
+            "cwd": str(workdir),
+            "stdout": output,
+            "stderr": error_output,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            "backend": "local",
+        }
+
     @staticmethod
     def _validate_arguments(command: list[str], framework: str) -> None:
         """Reject interpreter escape hatches while keeping normal test runners usable."""
@@ -89,7 +123,8 @@ class SafeTestExecutor:
         dangerous = {"-c", "--command", "-e", "--eval", "-i", "--interactive"}
         if dangerous.intersection(lowered):
             raise ValueError("Inline interpreter execution is not allowed")
-        if command[0].lower().split("\\")[-1] in {"python", "python.exe", "py", "py.exe"}:
+        cmd_name = command[0].lower().split("\\")[-1]
+        if cmd_name in {"python", "python.exe", "py", "py.exe"}:
             for index, item in enumerate(lowered):
                 if item in {"-m", "--module"}:
                     module = lowered[index + 1] if index + 1 < len(lowered) else ""
@@ -97,3 +132,191 @@ class SafeTestExecutor:
                         raise ValueError(f"Python module is not allowed: {module}")
         if any(item in {"&&", "||", ";", "|", ">", "<"} for item in command):
             raise ValueError("Shell operators are not allowed")
+
+
+class DockerSandboxExecutor(BaseTestExecutor):
+    """Run tests inside an isolated, resource-constrained Docker container."""
+
+    FRAMEWORK_IMAGES = {
+        "pytest": "python:3.11-slim",
+        "jest": "node:18-slim",
+        "playwright": "mcr.microsoft.com/playwright:v1.40.0-focal",
+        "maven": "maven:3.9-eclipse-temurin-17",
+    }
+
+    def __init__(
+        self,
+        workspace_root: str | Path,
+        timeout_seconds: int = 120,
+        max_output_chars: int = 30_000,
+        image: str | None = None,
+        memory_limit: str = "512m",
+        cpus_limit: str = "1.0",
+        pids_limit: int = 100,
+        allow_network: bool = False,
+        container_workspace: str = "/workspace",
+    ) -> None:
+        super().__init__(workspace_root, timeout_seconds, max_output_chars)
+        self.image = image
+        self.memory_limit = memory_limit
+        self.cpus_limit = cpus_limit
+        self.pids_limit = pids_limit
+        self.allow_network = allow_network
+        self.container_workspace = container_workspace
+
+    def build_docker_command(
+        self,
+        command: Sequence[str],
+        workdir: Path,
+        framework: str = "pytest",
+    ) -> list[str]:
+        target_image = self.image or self.FRAMEWORK_IMAGES.get(framework.lower(), "python:3.11-slim")
+        # Normalize local windows path to forward slashes for Docker volume mount
+        host_path = str(workdir.resolve()).replace("\\", "/")
+
+        # Map executable command for container environment
+        container_cmd = self._normalize_container_command(list(command), framework)
+
+        docker_args = [
+            "docker",
+            "run",
+            "--rm",
+            f"--memory={self.memory_limit}",
+            f"--cpus={self.cpus_limit}",
+            f"--pids-limit={self.pids_limit}",
+            "--security-opt=no-new-privileges",
+            "--cap-drop=ALL",
+            f"--network={'bridge' if self.allow_network else 'none'}",
+            "-v",
+            f"{host_path}:{self.container_workspace}:rw",
+            "-w",
+            self.container_workspace,
+            target_image,
+            *container_cmd,
+        ]
+        return docker_args
+
+    def run(
+        self,
+        command: Sequence[str],
+        cwd: str | Path | None = None,
+        framework: str = "pytest",
+    ) -> dict[str, Any]:
+        if not command:
+            raise ValueError("Test command cannot be empty")
+        workdir = (Path(cwd) if cwd else self.workspace_root).resolve()
+        self._ensure_inside(workdir)
+
+        docker_cmd = self.build_docker_command(command, workdir, framework)
+        started = time.perf_counter()
+        try:
+            completed = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+            timed_out = False
+            return_code = completed.returncode
+            stdout, stderr = completed.stdout, completed.stderr
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            return_code = None
+            stdout = self._text(exc.stdout)
+            stderr = self._text(exc.stderr) + "\n[timeout: container killed]"
+
+        output = (stdout or "")[-self.max_output_chars :]
+        error_output = (stderr or "")[-self.max_output_chars :]
+        return {
+            "passed": return_code == 0 and not timed_out,
+            "exit_code": return_code,
+            "timed_out": timed_out,
+            "command": list(command),
+            "cwd": str(workdir),
+            "stdout": output,
+            "stderr": error_output,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            "backend": "docker",
+        }
+
+    @staticmethod
+    def _normalize_container_command(command: list[str], framework: str) -> list[str]:
+        """Convert host-specific binary paths (e.g. D:\\python.exe) to container-safe binaries."""
+        first = Path(command[0]).name.lower()
+        if first.endswith(".exe") or first.endswith(".cmd"):
+            first = first.rsplit(".", 1)[0]
+        if first in ("python", "py"):
+            first = "python"
+        elif first in ("node", "npm", "npx"):
+            first = first
+        elif first == "pytest":
+            first = "pytest"
+
+        return [first, *command[1:]]
+
+
+def is_docker_available() -> bool:
+    """Check if Docker CLI is installed and the Docker daemon is running."""
+    docker_bin = shutil.which("docker")
+    if not docker_bin:
+        return False
+    try:
+        res = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=3,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
+def create_test_executor(
+    workspace_root: str | Path,
+    backend: str = "auto",
+    timeout_seconds: int = 120,
+    max_output_chars: int = 30_000,
+    **kwargs: Any,
+) -> BaseTestExecutor:
+    """Factory function for creating appropriate test executor instance."""
+    backend_mode = (backend or "auto").lower()
+
+    if backend_mode == "docker":
+        if not is_docker_available():
+            raise RuntimeError(
+                "Docker sandbox executor requested, but Docker is not installed or the Docker daemon is not running."
+            )
+        return DockerSandboxExecutor(
+            workspace_root=workspace_root,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+            **kwargs,
+        )
+
+    if backend_mode == "auto":
+        if is_docker_available():
+            logger.info("Docker daemon available. Using DockerSandboxExecutor.")
+            return DockerSandboxExecutor(
+                workspace_root=workspace_root,
+                timeout_seconds=timeout_seconds,
+                max_output_chars=max_output_chars,
+                **kwargs,
+            )
+        logger.warning("Docker is not available. Falling back to LocalSubprocessExecutor.")
+        return LocalSubprocessExecutor(
+            workspace_root=workspace_root,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+
+    return LocalSubprocessExecutor(
+        workspace_root=workspace_root,
+        timeout_seconds=timeout_seconds,
+        max_output_chars=max_output_chars,
+    )
+
+
+# Backward compatibility alias
+SafeTestExecutor = LocalSubprocessExecutor

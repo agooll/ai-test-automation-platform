@@ -64,6 +64,8 @@ class AgentRunRequest(BaseModel):
     human_review: bool = True
     collection_name: Optional[str] = "test_collection"
     language: Optional[str] = "python"
+    execution_backend: Optional[str] = "auto"
+
 
 
 class ResumeRequest(BaseModel):
@@ -151,7 +153,9 @@ class AgentJobManager:
             human_review=req.human_review,
             task_id=task_id,
             event_sink=event_sink,
+            execution_backend=req.execution_backend or "auto",
         )
+
 
         job = AgentJob(task_id=task_id, status="QUEUED", config=config)
         self.jobs[task_id] = job

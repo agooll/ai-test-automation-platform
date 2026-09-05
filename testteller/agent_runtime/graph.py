@@ -17,7 +17,7 @@ from langgraph.types import Command, interrupt
 
 from .state import AgentState
 from .checkpoint import AsyncCheckpointStore, CheckpointStore
-from .tools import AgentToolRegistry, SafeTestExecutor, WorkspaceArtifacts
+from .tools import AgentToolRegistry, SafeTestExecutor, WorkspaceArtifacts, create_test_executor
 from .trace import TraceRecorder
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ class AgenticTestWorkflow:
         checkpointer: Any | None = None,
         checkpoint_path: str | None = None,
         event_sink: EventSink | None = None,
+        execution_backend: str = "auto",
     ) -> None:
         self.planner = planner or self._default_planner
         self.retriever = retriever or self._default_retriever
@@ -57,7 +58,9 @@ class AgenticTestWorkflow:
         self.reviewer = reviewer or self._default_reviewer
         self.tools = tool_registry or AgentToolRegistry()
         self.event_sink = event_sink
+        self.execution_backend = execution_backend
         self._register_tools()
+
         self._checkpoint_store = None
         self._async_checkpoint_store = None
         self._checkpoint_path = checkpoint_path
@@ -385,10 +388,10 @@ class AgenticTestWorkflow:
     def _write_files(workspace: str, files: dict[str, str]) -> list[str]:
         return WorkspaceArtifacts(workspace).write_files(files)
 
-    @staticmethod
-    async def _run_tests(workspace: str, command: list[str], framework: str) -> dict[str, Any]:
-        executor = SafeTestExecutor(workspace)
+    async def _run_tests(self, workspace: str, command: list[str], framework: str) -> dict[str, Any]:
+        executor = create_test_executor(workspace, backend=self.execution_backend)
         return await asyncio.to_thread(executor.run, command, framework=framework)
+
 
 
 def build_agentic_workflow(**kwargs: Any) -> AgenticTestWorkflow:
