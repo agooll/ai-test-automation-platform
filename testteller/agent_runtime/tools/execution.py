@@ -1,4 +1,4 @@
-"""Safe, bounded execution of generated test projects with Local and Docker backends."""
+"""Safe, bounded execution of generated test projects with Local and Docker Sandbox backends."""
 
 from __future__ import annotations
 
@@ -9,7 +9,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
+
+from ..sandbox.artifacts import ArtifactExtractor
+from ..sandbox.lifecycle import ContainerLifecycleManager
+from ..sandbox.policy import NetworkPolicy, SandboxPolicy
+from ..sandbox.workspace import PerRunWorkspace
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +109,8 @@ class LocalSubprocessExecutor(BaseTestExecutor):
 
         output = (stdout or "")[-self.max_output_chars :]
         error_output = (stderr or "")[-self.max_output_chars :]
+        artifacts = ArtifactExtractor.extract_from_dir(workdir)
+
         return {
             "passed": return_code == 0 and not timed_out,
             "exit_code": return_code,
@@ -114,6 +121,7 @@ class LocalSubprocessExecutor(BaseTestExecutor):
             "stderr": error_output,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             "backend": "local",
+            "artifacts": artifacts,
         }
 
     @staticmethod
@@ -135,13 +143,18 @@ class LocalSubprocessExecutor(BaseTestExecutor):
 
 
 class DockerSandboxExecutor(BaseTestExecutor):
-    """Run tests inside an isolated, resource-constrained Docker container."""
+    """Run tests inside an isolated, resource-constrained Docker container with guaranteed lifecycle."""
 
     FRAMEWORK_IMAGES = {
         "pytest": "python:3.11-slim",
         "jest": "node:18-slim",
         "playwright": "mcr.microsoft.com/playwright:v1.40.0-focal",
         "maven": "maven:3.9-eclipse-temurin-17",
+    }
+
+    PINNED_RUNNER_IMAGES = {
+        "pytest": "testteller-runner-python:3.11-v1",
+        "jest": "testteller-runner-node:18-v1",
     }
 
     def __init__(
@@ -155,14 +168,48 @@ class DockerSandboxExecutor(BaseTestExecutor):
         pids_limit: int = 100,
         allow_network: bool = False,
         container_workspace: str = "/workspace",
+        policy: SandboxPolicy | None = None,
+        task_id: str | None = None,
+        use_pinned_runner: bool = False,
+        runner_func: Callable[..., subprocess.CompletedProcess] | None = None,
     ) -> None:
         super().__init__(workspace_root, timeout_seconds, max_output_chars)
         self.image = image
-        self.memory_limit = memory_limit
-        self.cpus_limit = cpus_limit
-        self.pids_limit = pids_limit
-        self.allow_network = allow_network
-        self.container_workspace = container_workspace
+        self.task_id = task_id
+        self.use_pinned_runner = use_pinned_runner
+        self._runner_func = runner_func
+
+        if policy is not None:
+            self.policy = policy
+        else:
+            net_policy = NetworkPolicy.BRIDGE if allow_network else NetworkPolicy.NONE
+            self.policy = SandboxPolicy(
+                memory_limit=memory_limit,
+                cpus_limit=cpus_limit,
+                pids_limit=pids_limit,
+                timeout_seconds=timeout_seconds,
+                network_policy=net_policy,
+                container_workspace=container_workspace,
+                runner_image=image,
+            )
+
+        # Backward compatibility properties
+        self.memory_limit = self.policy.memory_limit
+        self.cpus_limit = self.policy.cpus_limit
+        self.pids_limit = self.policy.pids_limit
+        self.allow_network = (self.policy.network_policy == NetworkPolicy.BRIDGE)
+        self.container_workspace = self.policy.container_workspace
+
+    def resolve_image(self, framework: str = "pytest") -> str:
+        """Resolve runner image respecting explicit overrides and pinned configuration."""
+        fw = framework.lower()
+        if self.image:
+            return self.image
+        if self.policy.runner_image:
+            return self.policy.runner_image
+        if self.use_pinned_runner:
+            return self.PINNED_RUNNER_IMAGES.get(fw, self.FRAMEWORK_IMAGES.get(fw, "python:3.11-slim"))
+        return self.FRAMEWORK_IMAGES.get(fw, "python:3.11-slim")
 
     def build_docker_command(
         self,
@@ -170,20 +217,18 @@ class DockerSandboxExecutor(BaseTestExecutor):
         workdir: Path,
         framework: str = "pytest",
     ) -> list[str]:
-        target_image = self.image or self.FRAMEWORK_IMAGES.get(framework.lower(), "python:3.11-slim")
-        # Normalize local windows path to forward slashes for Docker volume mount
+        """Construct legacy/standalone docker run command for backward compatibility."""
+        target_image = self.resolve_image(framework)
         host_path = str(workdir.resolve()).replace("\\", "/")
-
-        # Map executable command for container environment
         container_cmd = self._normalize_container_command(list(command), framework)
 
         docker_args = [
             "docker",
             "run",
             "--rm",
-            f"--memory={self.memory_limit}",
-            f"--cpus={self.cpus_limit}",
-            f"--pids-limit={self.pids_limit}",
+            f"--memory={self.policy.memory_limit}",
+            f"--cpus={self.policy.cpus_limit}",
+            f"--pids-limit={self.policy.pids_limit}",
             "--security-opt=no-new-privileges",
             "--cap-drop=ALL",
             f"--network={'bridge' if self.allow_network else 'none'}",
@@ -207,37 +252,57 @@ class DockerSandboxExecutor(BaseTestExecutor):
         workdir = (Path(cwd) if cwd else self.workspace_root).resolve()
         self._ensure_inside(workdir)
 
-        docker_cmd = self.build_docker_command(command, workdir, framework)
-        started = time.perf_counter()
-        try:
-            completed = subprocess.run(
-                docker_cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                check=False,
-            )
-            timed_out = False
-            return_code = completed.returncode
-            stdout, stderr = completed.stdout, completed.stderr
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            return_code = None
-            stdout = self._text(exc.stdout)
-            stderr = self._text(exc.stderr) + "\n[timeout: container killed]"
+        target_image = self.resolve_image(framework)
+        container_cmd = self._normalize_container_command(list(command), framework)
 
-        output = (stdout or "")[-self.max_output_chars :]
-        error_output = (stderr or "")[-self.max_output_chars :]
+        # Stage workspace if workspace isolation is enabled
+        if self.policy.isolate_workspace:
+            with PerRunWorkspace(source_workspace=workdir, task_id=self.task_id) as staged_ws:
+                assert staged_ws.staging_dir is not None
+                lifecycle = ContainerLifecycleManager(
+                    policy=self.policy,
+                    task_id=self.task_id,
+                    runner_func=self._runner_func,
+                )
+                res = lifecycle.run_container(
+                    image=target_image,
+                    command=container_cmd,
+                    host_workspace=staged_ws.staging_dir,
+                )
+                artifacts = ArtifactExtractor.extract_from_dir(staged_ws.staging_dir)
+        else:
+            lifecycle = ContainerLifecycleManager(
+                policy=self.policy,
+                task_id=self.task_id,
+                runner_func=self._runner_func,
+            )
+            res = lifecycle.run_container(
+                image=target_image,
+                command=container_cmd,
+                host_workspace=workdir,
+            )
+            artifacts = ArtifactExtractor.extract_from_dir(workdir)
+
+        exit_code = res.get("exit_code")
+        timed_out = res.get("timed_out", False)
+        output = (res.get("stdout") or "")[-self.max_output_chars :]
+        error_output = (res.get("stderr") or "")[-self.max_output_chars :]
+
         return {
-            "passed": return_code == 0 and not timed_out,
-            "exit_code": return_code,
+            "passed": exit_code == 0 and not timed_out,
+            "exit_code": exit_code,
             "timed_out": timed_out,
             "command": list(command),
             "cwd": str(workdir),
             "stdout": output,
             "stderr": error_output,
-            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            "duration_ms": res.get("duration_ms", 0.0),
             "backend": "docker",
+            "runner_image": target_image,
+            "runner_version": self.policy.runner_version,
+            "container_name": res.get("container_name"),
+            "artifacts": artifacts,
+            "policy": self.policy.to_dict(),
         }
 
     @staticmethod
@@ -278,6 +343,7 @@ def create_test_executor(
     backend: str = "auto",
     timeout_seconds: int = 120,
     max_output_chars: int = 30_000,
+    policy: SandboxPolicy | None = None,
     **kwargs: Any,
 ) -> BaseTestExecutor:
     """Factory function for creating appropriate test executor instance."""
@@ -292,6 +358,7 @@ def create_test_executor(
             workspace_root=workspace_root,
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
+            policy=policy,
             **kwargs,
         )
 
@@ -302,6 +369,7 @@ def create_test_executor(
                 workspace_root=workspace_root,
                 timeout_seconds=timeout_seconds,
                 max_output_chars=max_output_chars,
+                policy=policy,
                 **kwargs,
             )
         logger.warning("Docker is not available. Falling back to LocalSubprocessExecutor.")

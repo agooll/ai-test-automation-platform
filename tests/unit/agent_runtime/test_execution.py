@@ -23,6 +23,7 @@ def test_safe_executor_runs_only_inside_workspace(tmp_path: Path):
     assert result["passed"] is True
     assert result["exit_code"] == 0
     assert result["backend"] == "local"
+    assert "artifacts" in result
 
 
 def test_safe_executor_rejects_unapproved_command(tmp_path: Path):
@@ -95,7 +96,7 @@ def test_docker_executor_run_mocked(tmp_path: Path):
         assert res["exit_code"] == 0
         assert res["backend"] == "docker"
         assert "1 passed" in res["stdout"]
-        mock_run.assert_called_once()
+        assert mock_run.call_count >= 1
 
 
 def test_docker_executor_timeout_handling(tmp_path: Path):
@@ -105,7 +106,7 @@ def test_docker_executor_timeout_handling(tmp_path: Path):
         assert res["passed"] is False
         assert res["timed_out"] is True
         assert res["backend"] == "docker"
-        assert "[timeout: container killed]" in res["stderr"]
+        assert "[timeout: container killed" in res["stderr"]
 
 
 def test_create_test_executor_auto_fallback(tmp_path: Path):
