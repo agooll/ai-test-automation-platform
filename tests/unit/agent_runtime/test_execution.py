@@ -67,7 +67,7 @@ def test_docker_command_construction(tmp_path: Path):
     assert "--network=none" in cmd
     assert "--security-opt=no-new-privileges" in cmd
     assert "--cap-drop=ALL" in cmd
-    assert "python:3.11-slim" in cmd
+    assert "testteller-runner-python:3.11-v1" in cmd
     # Command normalized from python.exe to python
     assert cmd[-4:] == ["python", "-m", "pytest", "-q"]
 
@@ -79,7 +79,7 @@ def test_docker_command_node_framework(tmp_path: Path):
         workdir=tmp_path,
         framework="jest",
     )
-    assert "node:18-slim" in cmd
+    assert "testteller-runner-node:18-v1" in cmd
     assert cmd[-2:] == ["npm", "test"]
 
 

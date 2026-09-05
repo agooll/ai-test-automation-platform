@@ -106,6 +106,21 @@
             <label>执行命令
               <input id="agent-command" value="python -m pytest -q">
             </label>
+            <div class="form-row" style="margin-top: 8px;">
+              <label>执行环境 (Execution Backend)
+                <select id="agent-backend" class="styled-select">
+                  <option value="auto" selected>自动检测 (Auto: Docker with Local Fallback)</option>
+                  <option value="docker">Docker 沙箱 (Docker Sandbox - Hardened)</option>
+                  <option value="local">宿主机子进程 (Local Subprocess)</option>
+                </select>
+              </label>
+            </div>
+            <div class="backend-specs-badge" id="backend-specs-badge" style="font-size: 0.8em; color: var(--muted); padding: 4px 8px; background: rgba(0,0,0,0.03); border-radius: 4px; margin-top: 4px; display: flex; gap: 12px; flex-wrap: wrap;">
+              <span>🛡️ 沙箱策略: Pinned Runner (testteller-runner-python:3.11-v1)</span>
+              <span>🔒 隔离: Staged Workspace</span>
+              <span>🌐 网络: none</span>
+              <span>⚡ 资源: 512MB RAM / 1.0 CPU</span>
+            </div>
             <div class="checkbox-row">
               <label class="checkbox-label">
                 <input id="agent-human-review" type="checkbox" checked>

@@ -17,7 +17,7 @@ from langgraph.types import Command, interrupt
 
 from .state import AgentState
 from .checkpoint import AsyncCheckpointStore, CheckpointStore
-from .tools import AgentToolRegistry, SafeTestExecutor, WorkspaceArtifacts, create_test_executor
+from .tools import AgentToolRegistry, SafeTestExecutor, SandboxPolicy, WorkspaceArtifacts, create_test_executor
 from .trace import TraceRecorder
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ class AgenticTestWorkflow:
         checkpoint_path: str | None = None,
         event_sink: EventSink | None = None,
         execution_backend: str = "auto",
+        sandbox_policy: SandboxPolicy | None = None,
     ) -> None:
         self.planner = planner or self._default_planner
         self.retriever = retriever or self._default_retriever
@@ -59,6 +60,7 @@ class AgenticTestWorkflow:
         self.tools = tool_registry or AgentToolRegistry()
         self.event_sink = event_sink
         self.execution_backend = execution_backend
+        self.sandbox_policy = sandbox_policy
         self._register_tools()
 
         self._checkpoint_store = None
@@ -177,7 +179,7 @@ class AgenticTestWorkflow:
     async def _execute_node(self, state: AgentState) -> AgentState:
         result = await self.tools.invoke(
             "run_tests", workspace=state["workspace"], command=state["test_command"],
-            framework=state.get("framework", "pytest"),
+            framework=state.get("framework", "pytest"), task_id=state.get("task_id"),
         )
         execution = result.data if result.ok else {"passed": False, "error": result.error}
         passed = bool(execution.get("passed"))
@@ -388,8 +390,13 @@ class AgenticTestWorkflow:
     def _write_files(workspace: str, files: dict[str, str]) -> list[str]:
         return WorkspaceArtifacts(workspace).write_files(files)
 
-    async def _run_tests(self, workspace: str, command: list[str], framework: str) -> dict[str, Any]:
-        executor = create_test_executor(workspace, backend=self.execution_backend)
+    async def _run_tests(self, workspace: str, command: list[str], framework: str, task_id: str | None = None) -> dict[str, Any]:
+        executor = create_test_executor(
+            workspace,
+            backend=self.execution_backend,
+            policy=self.sandbox_policy,
+            task_id=task_id,
+        )
         return await asyncio.to_thread(executor.run, command, framework=framework)
 
 

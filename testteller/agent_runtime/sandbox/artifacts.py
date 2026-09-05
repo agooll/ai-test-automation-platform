@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import shutil
 from typing import Any
 import xml.etree.ElementTree as ET
 
@@ -12,10 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 class ArtifactExtractor:
-    """Discovers and parses standard test execution artifacts."""
+    """Discovers, parses, and persists standard test execution artifacts."""
 
     @staticmethod
     def extract_from_dir(workspace_dir: Path | str) -> dict[str, Any]:
+        """Extract artifacts in-place from a directory."""
         workdir = Path(workspace_dir).resolve()
         artifacts: dict[str, Any] = {
             "junit_xml": None,
@@ -81,6 +83,36 @@ class ArtifactExtractor:
         for img in workdir.glob("*.png"):
             artifacts["captured_files"].append(img.name)
 
+        return artifacts
+
+    @classmethod
+    def extract_and_persist(
+        cls,
+        source_dir: Path | str,
+        persistent_dir: Path | str,
+    ) -> dict[str, Any]:
+        """Extract artifacts from source_dir, persist them to persistent_dir before staging deletion."""
+        src = Path(source_dir).resolve()
+        dest = Path(persistent_dir).resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+
+        # First extract structured data from source
+        artifacts = cls.extract_from_dir(src)
+        persisted_files: list[str] = []
+
+        # Copy captured files to persistent storage
+        for file_name in artifacts["captured_files"]:
+            src_file = src / file_name
+            dest_file = dest / file_name
+            if src_file.is_file():
+                try:
+                    shutil.copy2(src_file, dest_file)
+                    persisted_files.append(file_name)
+                except Exception as exc:
+                    logger.warning("Failed copying artifact %s to persistent dir: %s", file_name, exc)
+
+        artifacts["persisted_dir"] = str(dest)
+        artifacts["persisted_files"] = persisted_files
         return artifacts
 
     @staticmethod

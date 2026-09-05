@@ -19,6 +19,41 @@ from ..sandbox.workspace import PerRunWorkspace
 logger = logging.getLogger(__name__)
 
 
+def get_current_git_commit() -> str:
+    """Safely obtain the current git HEAD commit SHA."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return (res.stdout or "").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def ensure_reporting_command(
+    command: Sequence[str],
+    framework: str = "pytest",
+    generate_coverage: bool = False,
+    include_json_report: bool = False,
+) -> list[str]:
+    """Augment test command with standard reporting flags so artifacts are produced."""
+    cmd = list(command)
+    fw = framework.lower()
+    cmd_str = " ".join(cmd)
+    if fw == "pytest" or "pytest" in cmd_str:
+        if not any("--junitxml" in arg for arg in cmd):
+            cmd.append("--junitxml=junit.xml")
+        if include_json_report and not any("--json-report" in arg for arg in cmd):
+            cmd.extend(["--json-report", "--json-report-file=.report.json"])
+        if generate_coverage and not any("--cov" in arg for arg in cmd):
+            cmd.extend(["--cov", "--cov-report=xml:coverage.xml"])
+    return cmd
+
+
 class BaseTestExecutor(abc.ABC):
     """Abstract base class for test execution environments."""
 
@@ -27,10 +62,16 @@ class BaseTestExecutor(abc.ABC):
         workspace_root: str | Path,
         timeout_seconds: int = 120,
         max_output_chars: int = 30_000,
+        persistent_artifacts_dir: str | Path | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.timeout_seconds = timeout_seconds
         self.max_output_chars = max_output_chars
+        self.persistent_artifacts_dir = (
+            Path(persistent_artifacts_dir).resolve()
+            if persistent_artifacts_dir
+            else self.workspace_root / "artifacts"
+        )
 
     @abc.abstractmethod
     def run(
@@ -84,12 +125,14 @@ class LocalSubprocessExecutor(BaseTestExecutor):
             raise ValueError(f"Command is not allowed for {framework}: {command[0]}")
         self._validate_arguments([str(item) for item in command], framework.lower())
 
+        augmented_cmd = ensure_reporting_command(command, framework=framework)
+
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         started = time.perf_counter()
         try:
             completed = subprocess.run(
-                [str(item) for item in command],
+                [str(item) for item in augmented_cmd],
                 cwd=workdir,
                 env=env,
                 capture_output=True,
@@ -109,7 +152,9 @@ class LocalSubprocessExecutor(BaseTestExecutor):
 
         output = (stdout or "")[-self.max_output_chars :]
         error_output = (stderr or "")[-self.max_output_chars :]
-        artifacts = ArtifactExtractor.extract_from_dir(workdir)
+
+        persist_dir = self.persistent_artifacts_dir or (workdir / "artifacts")
+        artifacts = ArtifactExtractor.extract_and_persist(workdir, persist_dir)
 
         return {
             "passed": return_code == 0 and not timed_out,
@@ -121,6 +166,7 @@ class LocalSubprocessExecutor(BaseTestExecutor):
             "stderr": error_output,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             "backend": "local",
+            "repo_commit": get_current_git_commit(),
             "artifacts": artifacts,
         }
 
@@ -170,10 +216,16 @@ class DockerSandboxExecutor(BaseTestExecutor):
         container_workspace: str = "/workspace",
         policy: SandboxPolicy | None = None,
         task_id: str | None = None,
-        use_pinned_runner: bool = False,
+        use_pinned_runner: bool = True,
+        persistent_artifacts_dir: str | Path | None = None,
         runner_func: Callable[..., subprocess.CompletedProcess] | None = None,
     ) -> None:
-        super().__init__(workspace_root, timeout_seconds, max_output_chars)
+        super().__init__(
+            workspace_root=workspace_root,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+            persistent_artifacts_dir=persistent_artifacts_dir,
+        )
         self.image = image
         self.task_id = task_id
         self.use_pinned_runner = use_pinned_runner
@@ -201,7 +253,7 @@ class DockerSandboxExecutor(BaseTestExecutor):
         self.container_workspace = self.policy.container_workspace
 
     def resolve_image(self, framework: str = "pytest") -> str:
-        """Resolve runner image respecting explicit overrides and pinned configuration."""
+        """Resolve runner image prioritizing pinned runner images for deterministic execution."""
         fw = framework.lower()
         if self.image:
             return self.image
@@ -253,7 +305,9 @@ class DockerSandboxExecutor(BaseTestExecutor):
         self._ensure_inside(workdir)
 
         target_image = self.resolve_image(framework)
-        container_cmd = self._normalize_container_command(list(command), framework)
+        augmented_cmd = ensure_reporting_command(command, framework=framework, include_json_report=True)
+        container_cmd = self._normalize_container_command(augmented_cmd, framework)
+        persist_dir = self.persistent_artifacts_dir or (workdir / "artifacts")
 
         # Stage workspace if workspace isolation is enabled
         if self.policy.isolate_workspace:
@@ -269,7 +323,9 @@ class DockerSandboxExecutor(BaseTestExecutor):
                     command=container_cmd,
                     host_workspace=staged_ws.staging_dir,
                 )
-                artifacts = ArtifactExtractor.extract_from_dir(staged_ws.staging_dir)
+                # Persist artifacts before staging directory is wiped!
+                artifacts = ArtifactExtractor.extract_and_persist(staged_ws.staging_dir, persist_dir)
+                runner_digest = lifecycle.get_image_digest(target_image)
         else:
             lifecycle = ContainerLifecycleManager(
                 policy=self.policy,
@@ -281,7 +337,8 @@ class DockerSandboxExecutor(BaseTestExecutor):
                 command=container_cmd,
                 host_workspace=workdir,
             )
-            artifacts = ArtifactExtractor.extract_from_dir(workdir)
+            artifacts = ArtifactExtractor.extract_and_persist(workdir, persist_dir)
+            runner_digest = lifecycle.get_image_digest(target_image)
 
         exit_code = res.get("exit_code")
         timed_out = res.get("timed_out", False)
@@ -299,7 +356,9 @@ class DockerSandboxExecutor(BaseTestExecutor):
             "duration_ms": res.get("duration_ms", 0.0),
             "backend": "docker",
             "runner_image": target_image,
+            "runner_digest": runner_digest,
             "runner_version": self.policy.runner_version,
+            "repo_commit": get_current_git_commit(),
             "container_name": res.get("container_name"),
             "artifacts": artifacts,
             "policy": self.policy.to_dict(),
@@ -344,6 +403,8 @@ def create_test_executor(
     timeout_seconds: int = 120,
     max_output_chars: int = 30_000,
     policy: SandboxPolicy | None = None,
+    task_id: str | None = None,
+    persistent_artifacts_dir: str | Path | None = None,
     **kwargs: Any,
 ) -> BaseTestExecutor:
     """Factory function for creating appropriate test executor instance."""
@@ -359,6 +420,8 @@ def create_test_executor(
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
             policy=policy,
+            task_id=task_id,
+            persistent_artifacts_dir=persistent_artifacts_dir,
             **kwargs,
         )
 
@@ -370,6 +433,8 @@ def create_test_executor(
                 timeout_seconds=timeout_seconds,
                 max_output_chars=max_output_chars,
                 policy=policy,
+                task_id=task_id,
+                persistent_artifacts_dir=persistent_artifacts_dir,
                 **kwargs,
             )
         logger.warning("Docker is not available. Falling back to LocalSubprocessExecutor.")
@@ -377,12 +442,14 @@ def create_test_executor(
             workspace_root=workspace_root,
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
+            persistent_artifacts_dir=persistent_artifacts_dir,
         )
 
     return LocalSubprocessExecutor(
         workspace_root=workspace_root,
         timeout_seconds=timeout_seconds,
         max_output_chars=max_output_chars,
+        persistent_artifacts_dir=persistent_artifacts_dir,
     )
 
 

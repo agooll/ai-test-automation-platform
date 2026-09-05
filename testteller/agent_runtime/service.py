@@ -39,6 +39,7 @@ class AgentRunConfig:
     task_id: Optional[str] = None
     event_sink: Optional[EventSink] = None
     execution_backend: str = "auto"
+    sandbox_policy: Optional[Any] = None
 
 
 
@@ -111,6 +112,7 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         checkpoint_path=checkpoint_path,
         event_sink=config.event_sink,
         execution_backend=config.execution_backend,
+        sandbox_policy=config.sandbox_policy,
     )
 
     initial_state: AgentState = {

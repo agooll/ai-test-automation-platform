@@ -1062,13 +1062,14 @@ if HAS_AGENT_RUNTIME:
         max_repair_rounds: Annotated[int, typer.Option("--max-repair-rounds", min=0, max=3)] = 2,
         trace_file: Annotated[str, typer.Option("--trace-file")] = None,
         checkpoint_file: Annotated[str, typer.Option("--checkpoint-file")] = None,
+        execution_backend: Annotated[str, typer.Option("--execution-backend", "-b", help="Execution environment: auto, docker, or local")] = "auto",
     ):
         """Run the LangGraph generate-execute-repair test agent."""
         agent_run_command(
             input_file=input_file, collection_name=collection_name, language=language,
             framework=framework, output_dir=output_dir, test_command=test_command,
             max_repair_rounds=max_repair_rounds, trace_file=trace_file,
-            checkpoint_file=checkpoint_file,
+            checkpoint_file=checkpoint_file, execution_backend=execution_backend,
         )
 
 

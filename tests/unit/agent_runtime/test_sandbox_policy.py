@@ -15,6 +15,7 @@ from testteller.agent_runtime.tools.execution import (
     DockerSandboxExecutor,
     LocalSubprocessExecutor,
     create_test_executor,
+    ensure_reporting_command,
 )
 
 
@@ -47,7 +48,7 @@ def test_secrets_isolation_not_leaked_in_docker_args(monkeypatch, tmp_path: Path
     monkeypatch.setenv("OPENAI_API_KEY", "super-sensitive-key")
     policy = SandboxPolicy()
     mgr = ContainerLifecycleManager(policy=policy, task_id="sec01")
-    args = mgr.build_create_args("python:3.11-slim", ["pytest"], tmp_path)
+    args = mgr.build_create_args("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
 
     full_args_str = " ".join(args)
     assert "super-sensitive-key" not in full_args_str
@@ -105,7 +106,7 @@ def test_container_lifecycle_full_sequence(tmp_path: Path):
     calls = []
 
     def mock_runner(cmd, **kwargs):
-        calls.append(list(cmd))
+        calls.append((list(cmd), kwargs))
         mock_proc = MagicMock()
         mock_proc.returncode = 0
         if "wait" in cmd:
@@ -118,20 +119,25 @@ def test_container_lifecycle_full_sequence(tmp_path: Path):
             mock_proc.stderr = ""
         return mock_proc
 
-    policy = SandboxPolicy(timeout_seconds=30)
+    policy = SandboxPolicy(timeout_seconds=30, operation_timeout=15)
     mgr = ContainerLifecycleManager(policy=policy, task_id="run42", runner_func=mock_runner)
-    res = mgr.run_container("python:3.11-slim", ["pytest"], tmp_path)
+    res = mgr.run_container("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
 
     assert res["exit_code"] == 0
     assert res["timed_out"] is False
     assert "3 passed" in res["stdout"]
 
     # Verify explicit 5-stage lifecycle call sequence
-    assert calls[0][1] == "create"
-    assert calls[1] == ["docker", "start", mgr.container_name]
-    assert calls[2] == ["docker", "wait", mgr.container_name]
-    assert calls[3] == ["docker", "logs", mgr.container_name]
-    assert calls[4] == ["docker", "rm", "-f", mgr.container_name]
+    assert calls[0][0][1] == "create"
+    assert calls[0][1].get("timeout") == 15  # control plane timeout enforced!
+    assert calls[1][0] == ["docker", "start", mgr.container_name]
+    assert calls[1][1].get("timeout") == 15
+    assert calls[2][0] == ["docker", "wait", mgr.container_name]
+    assert calls[2][1].get("timeout") == 30  # execution timeout!
+    assert calls[3][0] == ["docker", "logs", mgr.container_name]
+    assert calls[3][1].get("timeout") == 15
+    assert calls[4][0] == ["docker", "rm", "-f", mgr.container_name]
+    assert calls[4][1].get("timeout") == 15
 
 
 def test_container_lifecycle_timeout_kills_and_removes(tmp_path: Path):
@@ -149,7 +155,7 @@ def test_container_lifecycle_timeout_kills_and_removes(tmp_path: Path):
 
     policy = SandboxPolicy(timeout_seconds=5)
     mgr = ContainerLifecycleManager(policy=policy, task_id="timeout_task", runner_func=mock_runner)
-    res = mgr.run_container("python:3.11-slim", ["pytest"], tmp_path)
+    res = mgr.run_container("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
 
     assert res["timed_out"] is True
     assert res["exit_code"] is None
@@ -169,14 +175,14 @@ def test_container_lifecycle_timeout_kills_and_removes(tmp_path: Path):
 def test_network_policy_none(tmp_path: Path):
     policy = SandboxPolicy(network_policy=NetworkPolicy.NONE)
     mgr = ContainerLifecycleManager(policy=policy)
-    args = mgr.build_create_args("python:3.11-slim", ["pytest"], tmp_path)
+    args = mgr.build_create_args("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
     assert "--network=none" in args
 
 
 def test_network_policy_bridge(tmp_path: Path):
     policy = SandboxPolicy(network_policy=NetworkPolicy.BRIDGE)
     mgr = ContainerLifecycleManager(policy=policy)
-    args = mgr.build_create_args("python:3.11-slim", ["pytest"], tmp_path)
+    args = mgr.build_create_args("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
     assert "--network=bridge" in args
 
 
@@ -187,7 +193,7 @@ def test_network_policy_target_only(tmp_path: Path):
         target_network="custom-test-net",
     )
     mgr = ContainerLifecycleManager(policy=policy)
-    args = mgr.build_create_args("python:3.11-slim", ["pytest"], tmp_path)
+    args = mgr.build_create_args("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
     assert "--network=custom-test-net" in args
     assert "--add-host" in args
     assert "target:192.168.1.100" in args
@@ -205,7 +211,7 @@ def test_resource_limits_and_read_only_rootfs(tmp_path: Path):
         read_only_rootfs=True,
     )
     mgr = ContainerLifecycleManager(policy=policy)
-    args = mgr.build_create_args("python:3.11-slim", ["pytest"], tmp_path)
+    args = mgr.build_create_args("testteller-runner-python:3.11-v1", ["pytest"], tmp_path)
 
     assert "--memory=256m" in args
     assert "--cpus=0.5" in args
@@ -219,7 +225,7 @@ def test_resource_limits_and_read_only_rootfs(tmp_path: Path):
 
 
 # ============================================================================
-# Guarantee 6: Artifact Extraction & Benchmark Fail-Fast
+# Guarantee 6: Artifact Extraction, Persistence & Benchmark Fail-Fast
 # ============================================================================
 
 def test_artifact_extractor_parses_junit_and_json(tmp_path: Path):
@@ -258,6 +264,38 @@ def test_artifact_extractor_parses_junit_and_json(tmp_path: Path):
     assert "coverage.json" in artifacts["captured_files"]
 
 
+def test_artifact_extract_and_persist_copies_files(tmp_path: Path):
+    source_staging = tmp_path / "staging"
+    source_staging.mkdir()
+    (source_staging / "junit.xml").write_text("<testsuites><testsuite tests='1' failures='0'/></testsuites>", encoding="utf-8")
+    (source_staging / "coverage.xml").write_text("<coverage/>", encoding="utf-8")
+
+    persistent_dir = tmp_path / "persistent_artifacts"
+
+    artifacts = ArtifactExtractor.extract_and_persist(source_staging, persistent_dir)
+    assert artifacts["persisted_dir"] == str(persistent_dir)
+    assert "junit.xml" in artifacts["persisted_files"]
+    assert "coverage.xml" in artifacts["persisted_files"]
+
+    # Verify physical file existence in persistent dir
+    assert (persistent_dir / "junit.xml").exists()
+    assert (persistent_dir / "coverage.xml").exists()
+
+
+def test_ensure_reporting_command_augments_pytest():
+    base_cmd = ["python", "-m", "pytest", "-q"]
+    augmented = ensure_reporting_command(
+        base_cmd,
+        framework="pytest",
+        generate_coverage=True,
+        include_json_report=True,
+    )
+
+    assert any("--junitxml=junit.xml" in arg for arg in augmented)
+    assert any("--json-report" in arg for arg in augmented)
+    assert any("--cov" in arg for arg in augmented)
+
+
 def test_benchmark_fail_fast_when_docker_missing(tmp_path: Path):
     with patch("testteller.agent_runtime.tools.execution.is_docker_available", return_value=False):
         # Strict benchmark requirement: must fail immediately, no silent fallback
@@ -265,7 +303,7 @@ def test_benchmark_fail_fast_when_docker_missing(tmp_path: Path):
             create_test_executor(tmp_path, backend="docker")
 
 
-def test_docker_sandbox_executor_integration_with_policy(tmp_path: Path):
+def test_docker_sandbox_executor_default_uses_pinned_runner(tmp_path: Path):
     def mock_runner(cmd, **kwargs):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
@@ -279,23 +317,19 @@ def test_docker_sandbox_executor_integration_with_policy(tmp_path: Path):
             mock_proc.stderr = ""
         return mock_proc
 
-    policy = SandboxPolicy(
-        memory_limit="512m",
-        runner_version="3.11-v1",
-        network_policy=NetworkPolicy.NONE,
-    )
     executor = DockerSandboxExecutor(
         workspace_root=tmp_path,
-        policy=policy,
         runner_func=mock_runner,
-        use_pinned_runner=True,
     )
+    # Default without explicit parameters must use testteller-runner-python:3.11-v1
+    assert executor.resolve_image("pytest") == "testteller-runner-python:3.11-v1"
 
     result = executor.run(["pytest", "-q"], framework="pytest")
     assert result["passed"] is True
     assert result["backend"] == "docker"
     assert result["runner_image"] == "testteller-runner-python:3.11-v1"
     assert result["runner_version"] == "3.11-v1"
+    assert "runner_digest" in result
+    assert "repo_commit" in result
     assert "artifacts" in result
-    assert result["policy"]["network_policy"] == "none"
-    assert result["policy"]["memory_limit"] == "512m"
+    assert result["artifacts"]["persisted_dir"] is not None

@@ -6,12 +6,13 @@ FROM python:3.11-slim
 RUN groupadd -g 1000 runner && \
     useradd -u 1000 -g runner -m -s /bin/bash runner
 
-# Copy pinned dependencies
-COPY docker/requirements.lock /tmp/requirements.lock
-
-# Install pinned dependencies
-RUN pip install --no-cache-dir -r /tmp/requirements.lock && \
-    rm /tmp/requirements.lock
+# Support both repo-root context and docker/ context
+COPY requirements.lock* docker/requirements.lock* /tmp/
+RUN if [ -f /tmp/requirements.lock ]; then \
+        pip install --no-cache-dir -r /tmp/requirements.lock; \
+    elif [ -f /tmp/docker/requirements.lock ]; then \
+        pip install --no-cache-dir -r /tmp/docker/requirements.lock; \
+    fi && rm -rf /tmp/requirements.lock /tmp/docker
 
 WORKDIR /workspace
 RUN chown runner:runner /workspace

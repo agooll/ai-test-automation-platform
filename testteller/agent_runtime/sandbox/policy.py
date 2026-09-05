@@ -25,9 +25,11 @@ class SandboxPolicy:
     cpus_limit: str = "1.0"
     pids_limit: int = 100
     timeout_seconds: int = 120
+    operation_timeout: int = 15
     network_policy: NetworkPolicy = NetworkPolicy.NONE
     target_host: str | None = None
     target_network: str | None = None
+    target_internal: bool = True
     read_only_rootfs: bool = True
     tmpfs_mounts: dict[str, str] = field(
         default_factory=lambda: {
@@ -67,7 +69,11 @@ class SandboxPolicy:
             "cpus_limit": self.cpus_limit,
             "pids_limit": self.pids_limit,
             "timeout_seconds": self.timeout_seconds,
+            "operation_timeout": self.operation_timeout,
             "network_policy": self.network_policy.value if isinstance(self.network_policy, NetworkPolicy) else str(self.network_policy),
+            "target_host": self.target_host,
+            "target_network": self.target_network,
+            "target_internal": self.target_internal,
             "read_only_rootfs": self.read_only_rootfs,
             "tmpfs_mounts": self.tmpfs_mounts,
             "user": self.user,

@@ -462,6 +462,8 @@
     agentEventsLog.textContent = "";
 
     try {
+      const backendSelect = document.getElementById("agent-backend");
+      const executionBackend = backendSelect ? backendSelect.value : "auto";
       const payload = {
         input_file: inputFile || null,
         markdown_content: markdownContent,
@@ -470,7 +472,8 @@
         max_repair_rounds: maxRepairRounds,
         test_command: testCommand,
         human_review: humanReview,
-        collection_name: col
+        collection_name: col,
+        execution_backend: executionBackend,
       };
       const res = await apiRequest("/api/agent-runs", "POST", payload);
       activeTaskId = res.task_id;

@@ -22,6 +22,7 @@ def agent_run_command(
     max_repair_rounds: int = 2,
     trace_file: Optional[str] = None,
     checkpoint_file: Optional[str] = None,
+    execution_backend: str = "auto",
 ) -> dict:
     """Generate, execute and repair automation tests through the agent graph."""
     config = AgentRunConfig(
@@ -34,6 +35,7 @@ def agent_run_command(
         max_repair_rounds=max_repair_rounds,
         trace_file=trace_file,
         checkpoint_file=checkpoint_file,
+        execution_backend=execution_backend,
     )
     try:
         prepared = asyncio.run(prepare_agent_run(config))

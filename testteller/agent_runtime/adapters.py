@@ -94,7 +94,8 @@ def build_existing_rag_workflow(generator: RAGEnhancedTestGenerator,
                                 llm_manager: LLMManager,
                                 checkpoint_path: str | None = None,
                                 event_sink: Any = None,
-                                execution_backend: str = "auto") -> AgenticTestWorkflow:
+                                execution_backend: str = "auto",
+                                sandbox_policy: Any = None) -> AgenticTestWorkflow:
     adapter = ExistingRAGAdapter(generator, test_cases, llm_manager)
     return AgenticTestWorkflow(
         planner=adapter.planner,
@@ -105,5 +106,6 @@ def build_existing_rag_workflow(generator: RAGEnhancedTestGenerator,
         checkpoint_path=checkpoint_path,
         event_sink=event_sink,
         execution_backend=execution_backend,
+        sandbox_policy=sandbox_policy,
     )
 

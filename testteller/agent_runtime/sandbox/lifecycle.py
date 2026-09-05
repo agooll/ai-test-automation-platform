@@ -29,7 +29,41 @@ class ContainerLifecycleManager:
         self.policy = policy or SandboxPolicy()
         self.task_id = task_id or uuid.uuid4().hex[:8]
         self.container_name = f"testteller_{self.task_id}_{uuid.uuid4().hex[:8]}"
+        self.op_timeout = self.policy.operation_timeout
         self._runner = runner_func or subprocess.run
+        self._created_network: str | None = None
+
+    def get_image_digest(self, image: str) -> str:
+        """Inspect the image to obtain its immutable repository digest or ID."""
+        try:
+            res = self._runner(
+                ["docker", "image", "inspect", "--format", "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}", image],
+                capture_output=True,
+                text=True,
+                timeout=self.op_timeout,
+                check=False,
+            )
+            digest = (res.stdout or "").strip()
+            return digest if digest else "sha256:unresolved"
+        except Exception:
+            return "sha256:unresolved"
+
+    def _ensure_target_network(self) -> str:
+        """Create an isolated, internal Docker network for target-only communication."""
+        net_name = self.policy.target_network or f"testteller_internal_{self.task_id}"
+        if self.policy.target_internal:
+            try:
+                self._runner(
+                    ["docker", "network", "create", "--internal", net_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.op_timeout,
+                    check=False,
+                )
+                self._created_network = net_name
+            except Exception as exc:
+                logger.debug("Failed creating internal network %s: %s", net_name, exc)
+        return net_name
 
     def build_create_args(
         self,
@@ -66,7 +100,7 @@ class ContainerLifecycleManager:
             args.extend(["--tmpfs", f"{tmpfs_path}:{tmpfs_opts}"])
 
         if self.policy.network_policy == NetworkPolicy.TARGET_ONLY:
-            target_net = self.policy.target_network or "bridge"
+            target_net = self.policy.target_network or f"testteller_internal_{self.task_id}"
             args.append(f"--network={target_net}")
             if self.policy.target_host:
                 args.extend(["--add-host", f"target:{self.policy.target_host}"])
@@ -100,18 +134,28 @@ class ContainerLifecycleManager:
         host_workspace: Path,
     ) -> dict[str, Any]:
         """Execute container through strict lifecycle stages with guaranteed cleanup."""
+        # If target-only network is requested, set it up
+        if self.policy.network_policy == NetworkPolicy.TARGET_ONLY and not self.policy.target_network:
+            self._ensure_target_network()
+
         create_args = self.build_create_args(image, command, host_workspace)
         started_at = time.perf_counter()
 
         logger.debug("Creating sandbox container %s: %s", self.container_name, " ".join(create_args))
         try:
-            create_res = self._runner(create_args, capture_output=True, text=True, check=False)
+            create_res = self._runner(
+                create_args,
+                capture_output=True,
+                text=True,
+                timeout=self.op_timeout,
+                check=False,
+            )
         except subprocess.TimeoutExpired:
             return {
                 "exit_code": None,
                 "timed_out": True,
                 "stdout": "",
-                "stderr": f"\n[timeout: container killed after {self.policy.timeout_seconds}s]",
+                "stderr": f"\n[timeout: container killed after {self.op_timeout}s]",
                 "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
                 "container_name": self.container_name,
             }
@@ -137,6 +181,7 @@ class ContainerLifecycleManager:
                 ["docker", "start", self.container_name],
                 capture_output=True,
                 text=True,
+                timeout=self.op_timeout,
                 check=False,
             )
 
@@ -159,6 +204,7 @@ class ContainerLifecycleManager:
                         ["docker", "kill", self.container_name],
                         capture_output=True,
                         text=True,
+                        timeout=self.op_timeout,
                         check=False,
                     )
                 except Exception:
@@ -170,6 +216,7 @@ class ContainerLifecycleManager:
                     ["docker", "logs", self.container_name],
                     capture_output=True,
                     text=True,
+                    timeout=self.op_timeout,
                     check=False,
                 )
                 stdout = logs_res.stdout or ""
@@ -188,10 +235,24 @@ class ContainerLifecycleManager:
                     ["docker", "rm", "-f", self.container_name],
                     capture_output=True,
                     text=True,
+                    timeout=self.op_timeout,
                     check=False,
                 )
             except Exception as exc:
                 logger.debug("Non-fatal exception during container cleanup %s: %s", self.container_name, exc)
+
+            # Clean up target internal network if created by this manager
+            if self._created_network:
+                try:
+                    self._runner(
+                        ["docker", "network", "rm", self._created_network],
+                        capture_output=True,
+                        text=True,
+                        timeout=self.op_timeout,
+                        check=False,
+                    )
+                except Exception:
+                    pass
 
         duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
         return {
