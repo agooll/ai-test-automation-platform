@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from testteller.agent_runtime.graph import AgenticTestWorkflow
 from testteller.agent_runtime.service import PreparedAgentRun
-from testteller.web.app import app
+from testteller.web.app import app, job_manager
 
 
 @pytest.fixture
@@ -88,6 +88,14 @@ async def test_agent_run_api_lifecycle(tmp_path: Path):
             assert "RUN_STARTED" in content
             assert "RUN_COMPLETED" in content
 
+            # Verify no duplicate lifecycle events
+            job = job_manager.get_job(task_id)
+            assert job is not None
+            event_types = [e.get("event") for e in job.events_history]
+            assert event_types.count("RUN_STARTED") == 1
+            assert event_types.count("RUN_COMPLETED") == 1
+
+
 
 @pytest.mark.asyncio
 async def test_agent_run_hitl_resume(tmp_path: Path):
@@ -147,4 +155,14 @@ async def test_agent_run_hitl_resume(tmp_path: Path):
 
             info = client.get(f"/api/agent-runs/{task_id}").json()
             assert info["status"] in ("PASS", "APPROVED", "MANUAL_APPROVED")
+
+            # Verify no duplicate lifecycle events for HITL resume run
+            job = job_manager.get_job(task_id)
+            assert job is not None
+            event_types = [e.get("event") for e in job.events_history]
+            assert event_types.count("RUN_STARTED") == 1
+            assert event_types.count("WAITING_REVIEW") == 1
+            assert event_types.count("RUN_RESUMED") == 1
+            assert event_types.count("RUN_COMPLETED") == 1
+
 
