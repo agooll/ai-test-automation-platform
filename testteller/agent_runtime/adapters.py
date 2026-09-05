@@ -92,7 +92,8 @@ Return only the complete corrected file. Do not add TODOs or invent endpoints.
 def build_existing_rag_workflow(generator: RAGEnhancedTestGenerator,
                                 test_cases: list[TestCase],
                                 llm_manager: LLMManager,
-                                checkpoint_path: str | None = None) -> AgenticTestWorkflow:
+                                checkpoint_path: str | None = None,
+                                event_sink: Any = None) -> AgenticTestWorkflow:
     adapter = ExistingRAGAdapter(generator, test_cases, llm_manager)
     return AgenticTestWorkflow(
         planner=adapter.planner,
@@ -101,4 +102,5 @@ def build_existing_rag_workflow(generator: RAGEnhancedTestGenerator,
         repairer=adapter.repair,
         reviewer=adapter.reviewer,
         checkpoint_path=checkpoint_path,
+        event_sink=event_sink,
     )

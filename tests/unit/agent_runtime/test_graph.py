@@ -55,3 +55,14 @@ async def test_graph_repairs_after_failure(tmp_path: Path):
     assert result["repair_success"] is True
     assert "analyze_failure" in [event["node"] for event in result["trace"]]
     assert (tmp_path / "trace.jsonl").read_text(encoding="utf-8").count("\n") == len(result["trace"])
+
+    # Verify repair_history multi-round diff tracking
+    assert len(result["repair_history"]) == 1
+    hist = result["repair_history"][0]
+    assert hist["round"] == 1
+    assert hist["re_execution_passed"] is True
+    assert "test_case.py" in hist["files"]
+    assert hist["files"]["test_case.py"]["diff"] != ""
+    assert "-    assert False" in hist["files"]["test_case.py"]["diff"]
+    assert "+    assert True" in hist["files"]["test_case.py"]["diff"]
+

@@ -1,24 +1,34 @@
-"""Local-only FastAPI console that reuses the TestTeller agent workflow."""
+"""FastAPI console for TestTeller RAG test generation and Agent execution."""
 
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+import json
 import logging
 import os
-import re
 from pathlib import Path
-from typing import Literal
+import re
+import time
+from typing import Any, Literal, Optional
+import uuid
 
-import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+import uvicorn
 
+from testteller.agent_runtime.graph import AgenticTestWorkflow
+from testteller.agent_runtime.service import AgentRunConfig, PreparedAgentRun, prepare_agent_run
+from testteller.agent_runtime.state import AgentState
 from testteller.generator_agent.agent.testteller_agent import TestTellerAgent
 
 logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
 COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
-app = FastAPI(title="TestTeller Console", version="0.1.0")
+app = FastAPI(title="TestTeller Console", version="0.2.0")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 
@@ -43,6 +53,180 @@ class GenerateRequest(CollectionRequest):
 class QualityCheckRequest(BaseModel):
     content: str = Field(min_length=1, max_length=200000)
     use_ai: bool = True
+
+
+class AgentRunRequest(BaseModel):
+    input_file: Optional[str] = None
+    markdown_content: Optional[str] = None
+    framework: Optional[str] = "pytest"
+    test_command: Optional[str] = "python -m pytest -q"
+    max_repair_rounds: int = Field(2, ge=0, le=3)
+    human_review: bool = True
+    collection_name: Optional[str] = "test_collection"
+    language: Optional[str] = "python"
+
+
+class ResumeRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+
+
+async def _safe_close(target: Any) -> None:
+    if target is None:
+        return
+    for method_name in ("aclose", "close"):
+        fn = getattr(target, method_name, None)
+        if callable(fn):
+            try:
+                res = fn()
+                if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                    await res
+                break
+            except Exception:
+                pass
+
+
+@dataclass
+class AgentJob:
+    task_id: str
+    status: str  # QUEUED, RUNNING, WAITING_REVIEW, PASS, REJECTED, FAILED, ERROR
+    config: AgentRunConfig
+    events_history: list[dict[str, Any]] = field(default_factory=list)
+    subscribers: list[asyncio.Queue] = field(default_factory=list)
+    workflow: Optional[AgenticTestWorkflow] = None
+    vector_store: Any = None
+    result: Optional[AgentState] = None
+    error: Optional[str] = None
+
+    async def emit(self, event_data: dict[str, Any]) -> None:
+        if "timestamp" not in event_data:
+            event_data["timestamp"] = time.time()
+        self.events_history.append(event_data)
+        for q in list(self.subscribers):
+            await q.put(event_data)
+
+
+class AgentJobManager:
+    def __init__(self) -> None:
+        self.jobs: dict[str, AgentJob] = {}
+
+    def get_job(self, task_id: str) -> Optional[AgentJob]:
+        return self.jobs.get(task_id)
+
+    async def create_job(self, req: AgentRunRequest) -> AgentJob:
+        task_id = str(uuid.uuid4())
+        input_file = req.input_file
+
+        if not input_file or not Path(input_file).is_file():
+            if req.markdown_content and req.markdown_content.strip():
+                run_dir = Path("./testteller_agent_runs").resolve() / task_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                temp_file = run_dir / "test_cases.md"
+                temp_file.write_text(req.markdown_content.strip(), encoding="utf-8")
+                input_file = str(temp_file)
+            else:
+                raise HTTPException(400, "Must provide valid input_file path or non-empty markdown_content")
+
+        job: AgentJob | None = None
+
+        async def event_sink(event_data: dict[str, Any]) -> None:
+            if job:
+                await job.emit(event_data)
+
+        config = AgentRunConfig(
+            input_file=input_file,
+            collection_name=req.collection_name,
+            language=req.language,
+            framework=req.framework,
+            test_command=req.test_command,
+            max_repair_rounds=req.max_repair_rounds,
+            human_review=req.human_review,
+            task_id=task_id,
+            event_sink=event_sink,
+        )
+
+        job = AgentJob(task_id=task_id, status="QUEUED", config=config)
+        self.jobs[task_id] = job
+        asyncio.create_task(self._run_job(job))
+        return job
+
+    async def _run_job(self, job: AgentJob) -> None:
+        job.status = "RUNNING"
+        await job.emit({"event": "RUN_STARTED", "task_id": job.task_id})
+        try:
+            prepared: PreparedAgentRun = await prepare_agent_run(job.config)
+            job.workflow = prepared.workflow
+            job.vector_store = prepared.vector_store
+
+            result = await prepared.workflow.run(prepared.initial_state, thread_id=job.task_id)
+            job.result = result
+
+            if "__interrupt__" in result:
+                job.status = "WAITING_REVIEW"
+                await job.emit({
+                    "event": "WAITING_REVIEW",
+                    "task_id": job.task_id,
+                    "repair_history": result.get("repair_history", []),
+                    "execution_result": result.get("execution_result", {}),
+                })
+            else:
+                verdict = result.get("final_verdict")
+                if not verdict:
+                    verdict = "PASS" if result.get("execution_success") else "FAILED"
+                job.status = verdict
+                await job.emit({
+                    "event": "RUN_COMPLETED",
+                    "task_id": job.task_id,
+                    "final_verdict": job.status,
+                    "repair_history": result.get("repair_history", []),
+                    "result": result,
+                })
+                await _safe_close(prepared.workflow)
+                await _safe_close(prepared.vector_store)
+        except Exception as e:
+            logger.exception("Agent job execution error: %s", e)
+            job.status = "ERROR"
+            job.error = str(e)
+            await job.emit({"event": "RUN_ERROR", "task_id": job.task_id, "error": str(e)})
+            await _safe_close(job.workflow)
+            await _safe_close(job.vector_store)
+
+    async def resume_job(self, task_id: str, decision: str) -> dict[str, Any]:
+        job = self.jobs.get(task_id)
+        if not job:
+            raise HTTPException(404, f"Task not found: {task_id}")
+        if job.status != "WAITING_REVIEW" or not job.workflow:
+            raise HTTPException(400, f"Task is not waiting for review (status: {job.status})")
+
+        job.status = "RUNNING"
+        await job.emit({"event": "RUN_RESUMED", "task_id": task_id, "decision": decision})
+        try:
+            result = await job.workflow.resume(task_id, decision)
+            job.result = result
+            verdict = result.get("final_verdict")
+            if not verdict:
+                verdict = "PASS" if result.get("execution_success") else "FAILED"
+            job.status = verdict
+            await job.emit({
+                "event": "RUN_COMPLETED",
+                "task_id": task_id,
+                "final_verdict": job.status,
+                "repair_history": result.get("repair_history", []),
+                "result": result,
+            })
+            return {"task_id": task_id, "status": job.status, "result": result}
+        except Exception as e:
+            logger.exception("Error resuming agent job: %s", e)
+            job.status = "ERROR"
+            job.error = str(e)
+            await job.emit({"event": "RUN_ERROR", "task_id": task_id, "error": str(e)})
+            raise HTTPException(500, f"Error resuming run: {e}")
+        finally:
+            await _safe_close(job.workflow)
+            await _safe_close(job.vector_store)
+
+
+
+job_manager = AgentJobManager()
 
 
 def _validate_collection(collection_name: str) -> str:
@@ -132,6 +316,73 @@ async def quality_check(request: QualityCheckRequest) -> dict:
         return result.as_dict()
     finally:
         agent.close()
+
+
+@app.post("/api/agent-runs")
+async def create_agent_run(request: AgentRunRequest) -> dict:
+    job = await job_manager.create_job(request)
+    return {"task_id": job.task_id, "status": job.status}
+
+
+@app.get("/api/agent-runs/{task_id}")
+async def get_agent_run(task_id: str) -> dict:
+    job = job_manager.get_job(task_id)
+    if not job:
+        raise HTTPException(404, f"Task not found: {task_id}")
+    return {
+        "task_id": job.task_id,
+        "status": job.status,
+        "final_verdict": job.result.get("final_verdict") if job.result else None,
+        "repair_rounds": job.result.get("repair_round", 0) if job.result else 0,
+        "repair_history": job.result.get("repair_history", []) if job.result else [],
+        "execution_result": job.result.get("execution_result") if job.result else None,
+        "error": job.error,
+    }
+
+
+@app.get("/api/agent-runs/{task_id}/events")
+async def stream_agent_events(task_id: str) -> StreamingResponse:
+    job = job_manager.get_job(task_id)
+    if not job:
+        raise HTTPException(404, f"Task not found: {task_id}")
+
+    async def event_generator():
+        # Replay historical events first to prevent race condition
+        for idx, ev in enumerate(list(job.events_history)):
+            yield f"id: {idx}\nevent: {ev.get('event', 'message')}\ndata: {json.dumps(ev, default=str)}\n\n"
+
+        if job.status in ("PASS", "REJECTED", "FAILED", "ERROR"):
+            return
+
+        queue: asyncio.Queue = asyncio.Queue()
+        job.subscribers.append(queue)
+        try:
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: {ev.get('event', 'message')}\ndata: {json.dumps(ev, default=str)}\n\n"
+                    if ev.get("event") in ("RUN_COMPLETED", "RUN_ERROR"):
+                        break
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            if queue in job.subscribers:
+                job.subscribers.remove(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/agent-runs/{task_id}/resume")
+async def resume_agent_run(task_id: str, request: ResumeRequest) -> dict:
+    return await job_manager.resume_job(task_id, request.decision)
 
 
 def run() -> None:

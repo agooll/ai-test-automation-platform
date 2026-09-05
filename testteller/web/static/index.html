@@ -63,8 +63,136 @@
         </div>
         <pre id="result">等待输入测试需求。</pre>
       </section>
+
+      <section class="card agent-card">
+        <div class="agent-head">
+          <div>
+            <p class="card-index">04 / AGENT RUNNER</p>
+            <h2>自动化测试闭环执行 (Agent Workflow)</h2>
+            <p>基于 LangGraph 调度：规划 → 检索 → 代码生成 → 执行验证 → 失败分析 → 自主修复 → 人工核准。</p>
+          </div>
+        </div>
+        <div class="agent-grid">
+          <div class="agent-col">
+            <label>测试用例来源路径 (Markdown / 文档)
+              <input id="agent-input-file" placeholder="sample-outputs/sample-testcases/sample-test-cases.md">
+            </label>
+            <div class="agent-input-actions">
+              <button class="button light" id="use-generated-btn" type="button">使用上方 03 结果</button>
+              <button class="button light" id="load-sample-btn" type="button">填充示例用例</button>
+            </div>
+          </div>
+          <div class="agent-col">
+            <div class="form-row">
+              <label>测试框架
+                <select id="agent-framework" class="styled-select">
+                  <option value="pytest" selected>pytest (Python)</option>
+                  <option value="jest">jest (JavaScript)</option>
+                  <option value="junit">junit (Java)</option>
+                </select>
+              </label>
+              <label>编程语言
+                <select id="agent-language" class="styled-select">
+                  <option value="python" selected>python</option>
+                  <option value="javascript">javascript</option>
+                  <option value="typescript">typescript</option>
+                  <option value="java">java</option>
+                </select>
+              </label>
+              <label class="compact">最大修复轮数
+                <input id="agent-max-repair" type="number" value="2" min="0" max="3">
+              </label>
+            </div>
+            <label>执行命令
+              <input id="agent-command" value="python -m pytest -q">
+            </label>
+            <div class="checkbox-row">
+              <label class="checkbox-label">
+                <input id="agent-human-review" type="checkbox" checked>
+                <span>启用人工裁决 (Human-in-the-Loop on budget exhaustion)</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="agent-action-bar">
+          <button class="button primary" id="start-agent-run">启动闭环执行 <span>→</span></button>
+        </div>
+      </section>
+
+      <section class="card timeline-card" id="timeline-section">
+        <div class="timeline-header">
+          <div>
+            <p class="card-index">05 / TIMELINE &amp; DIFF</p>
+            <h2>执行轨迹与修复观察</h2>
+          </div>
+          <div class="task-info">
+            <span class="task-id-tag">Task: <span id="current-task-id">未开始</span></span>
+            <span class="status-badge" id="task-status-badge">IDLE</span>
+          </div>
+        </div>
+
+        <!-- HITL Decision Banner -->
+        <div class="hitl-banner" id="hitl-banner" style="display:none;">
+          <div class="hitl-desc">
+            <strong>⚠️ 需要人工裁决 (Human-in-the-Loop)</strong>
+            <p>自动修复次数已用尽，测试仍有未通过项。请审查下方修复差异与失败证据，决定是否强制核准通过或驳回：</p>
+          </div>
+          <div class="hitl-actions">
+            <button class="button light approve-btn" id="hitl-approve">核准通过 (Approve)</button>
+            <button class="button primary reject-btn" id="hitl-reject">驳回修复 (Reject)</button>
+          </div>
+        </div>
+
+        <!-- Live Node Timeline -->
+        <div class="timeline-strip" id="timeline-strip">
+          <div class="timeline-node" data-node="plan"><span class="node-dot"></span><span class="node-name">PLAN</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="retrieve"><span class="node-dot"></span><span class="node-name">RETRIEVE</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="generate"><span class="node-dot"></span><span class="node-name">GENERATE</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="execute"><span class="node-dot"></span><span class="node-name">EXECUTE</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="analyze_failure"><span class="node-dot"></span><span class="node-name">ANALYZE</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="repair"><span class="node-dot"></span><span class="node-name">REPAIR</span></div>
+          <div class="timeline-arrow">→</div>
+          <div class="timeline-node" data-node="review"><span class="node-dot"></span><span class="node-name">REVIEW</span></div>
+        </div>
+
+        <!-- Repair Diffs & Execution Results Viewer -->
+        <div class="repair-diff-container">
+          <div class="repair-tabs" id="repair-tabs">
+            <span class="tab-label">修复轮次：</span>
+            <div id="repair-tab-buttons" class="tab-btn-group">
+              <span class="empty-hint">暂无修复记录</span>
+            </div>
+          </div>
+          <div class="diff-view" id="diff-view">
+            <div class="diff-header" id="diff-header">
+              <span id="diff-meta">等待任务运行...</span>
+              <span class="outcome-badge" id="diff-outcome"></span>
+            </div>
+            <div class="evidence-box" id="evidence-box" style="display:none;">
+              <div class="evidence-title">失败诊断证据 (Evidence)</div>
+              <pre id="evidence-content"></pre>
+            </div>
+            <div class="diff-box">
+              <div class="diff-title">代码变更对比 (Unified Diff)</div>
+              <div id="diff-content" class="diff-code-area">// 运行后将在此展示修复前后的变更对比与 Unified Diff</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Realtime Event Log -->
+        <div class="events-log-container">
+          <div class="events-log-title">实时事件流 (SSE Stream)</div>
+          <pre id="agent-events-log"></pre>
+        </div>
+      </section>
     </main>
     <div id="toast" role="status"></div>
     <script src="/static/app.js"></script>
+
   </body>
 </html>

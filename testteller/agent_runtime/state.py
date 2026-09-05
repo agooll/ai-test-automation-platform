@@ -27,6 +27,7 @@ class AgentState(TypedDict, total=False):
     review: dict[str, Any]
     human_review: bool
     human_decision: str
+    repair_history: list[dict[str, Any]]
     trace: list[dict[str, Any]]
     trace_path: str
     error: str | None
