@@ -25,11 +25,13 @@ from testteller.core.constants import (
     DEFAULT_OPENAI_EMBEDDING_MODEL, DEFAULT_OPENAI_GENERATION_MODEL,
     DEFAULT_CLAUDE_GENERATION_MODEL, DEFAULT_CLAUDE_EMBEDDING_PROVIDER,
     DEFAULT_LLAMA_EMBEDDING_MODEL, DEFAULT_LLAMA_GENERATION_MODEL, DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_ZHIPU_EMBEDDING_MODEL, DEFAULT_ZHIPU_GENERATION_MODEL, DEFAULT_ZHIPU_BASE_URL,
     DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CODE_EXTENSIONS, DEFAULT_TEMP_CLONE_DIR,
     DEFAULT_OUTPUT_FILE,
     DEFAULT_API_RETRY_ATTEMPTS, DEFAULT_API_RETRY_WAIT_SECONDS,
     ENV_GOOGLE_API_KEY, ENV_OPENAI_API_KEY, ENV_OPENAI_BASE_URL, ENV_CLAUDE_API_KEY, ENV_GITHUB_TOKEN,
+    ENV_ZHIPU_API_KEY, ENV_GLM_API_KEY, ENV_ZHIPU_BASE_URL, ENV_ZHIPU_EMBEDDING_MODEL, ENV_ZHIPU_GENERATION_MODEL,
     ENV_LLM_PROVIDER, ENV_LOG_LEVEL,
     ENV_CHROMA_DB_HOST, ENV_CHROMA_DB_PORT, ENV_CHROMA_DB_USE_REMOTE,
     ENV_CHROMA_DB_PERSIST_DIRECTORY, ENV_DEFAULT_COLLECTION_NAME,
@@ -102,6 +104,12 @@ class ApiKeysSettings(BaseSettings):
         None,
         env=ENV_CLAUDE_API_KEY,
         description="Anthropic Claude API key"
+    )
+
+    zhipu_api_key: Optional[str] = Field(
+        None,
+        env=ENV_ZHIPU_API_KEY,
+        description="Zhipu AI (GLM-4) API key"
     )
 
     github_token: Optional[str] = Field(
@@ -233,6 +241,25 @@ class LLMSettings(BaseSettings):
         description="Ollama server base URL"
     )
 
+    # Zhipu AI / GLM settings
+    zhipu_embedding_model: str = Field(
+        default=DEFAULT_ZHIPU_EMBEDDING_MODEL,
+        env=ENV_ZHIPU_EMBEDDING_MODEL,
+        description="Zhipu AI model for embeddings"
+    )
+
+    zhipu_generation_model: str = Field(
+        default=DEFAULT_ZHIPU_GENERATION_MODEL,
+        env=ENV_ZHIPU_GENERATION_MODEL,
+        description="Zhipu AI model for generation (e.g. glm-4, glm-4-flash)"
+    )
+
+    zhipu_base_url: str = Field(
+        default=DEFAULT_ZHIPU_BASE_URL,
+        env=ENV_ZHIPU_BASE_URL,
+        description="Zhipu AI OpenAI-compatible base URL"
+    )
+
     @validator("provider", allow_reuse=True)
     @classmethod
     def validate_provider(cls, v: str) -> str:
@@ -253,6 +280,8 @@ class LLMSettings(BaseSettings):
             return self.openai_embedding_model  # Claude uses OpenAI for embeddings
         elif self.provider == "llama":
             return self.llama_embedding_model
+        elif self.provider in ("zhipu", "glm"):
+            return self.zhipu_embedding_model
         return self.gemini_embedding_model
 
     @property
@@ -266,6 +295,8 @@ class LLMSettings(BaseSettings):
             return self.claude_generation_model
         elif self.provider == "llama":
             return self.llama_generation_model
+        elif self.provider in ("zhipu", "glm"):
+            return self.zhipu_generation_model
         return self.gemini_generation_model
 
 

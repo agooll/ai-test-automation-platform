@@ -11,6 +11,7 @@ from .gemini_client import GeminiClient
 from .openai_client import OpenAIClient
 from .claude_client import ClaudeClient
 from .llama_client import LlamaClient
+from .zhipu_client import ZhipuClient
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,9 @@ class LLMManager:
         # Infer provider from model name if not explicitly passed
         if generation_model and not provider:
             gm = generation_model.lower()
-            if "gemini" in gm:
+            if "glm" in gm or "zhipu" in gm:
+                provider = "zhipu"
+            elif "gemini" in gm:
                 provider = "gemini"
             elif "gpt" in gm or "o1" in gm or "o3" in gm:
                 provider = "openai"
@@ -130,10 +133,13 @@ class LLMManager:
     def _get_provider(self, provider: Optional[str] = None) -> str:
         """Get the LLM provider to use."""
         if provider:
-            if provider not in SUPPORTED_LLM_PROVIDERS:
+            prov_lower = provider.lower()
+            if prov_lower == "glm":
+                return "zhipu"
+            if prov_lower not in SUPPORTED_LLM_PROVIDERS:
                 raise ValueError(
                     f"Unsupported LLM provider: {provider}. Supported providers: {SUPPORTED_LLM_PROVIDERS}")
-            return provider.lower()
+            return prov_lower
 
         # Try to get from settings first
         try:
@@ -152,12 +158,14 @@ class LLMManager:
         # Default fallback
         return DEFAULT_LLM_PROVIDER.lower()
 
-    def _initialize_client(self) -> Union[GeminiClient, OpenAIClient, ClaudeClient, LlamaClient, OfflineFallbackLLMClient]:
+    def _initialize_client(self) -> Union[GeminiClient, OpenAIClient, ClaudeClient, LlamaClient, ZhipuClient, OfflineFallbackLLMClient]:
         """Initialize the appropriate LLM client based on the provider."""
         try:
             client = None
             if self.provider == "gemini":
                 client = GeminiClient(generation_model=self.generation_model, embedding_model=self.embedding_model)
+            elif self.provider in ("zhipu", "glm"):
+                client = ZhipuClient(generation_model=self.generation_model, embedding_model=self.embedding_model)
             elif self.provider == "openai":
                 client = OpenAIClient()
             elif self.provider == "claude":
@@ -190,8 +198,11 @@ class LLMManager:
             "gemini": "GOOGLE_API_KEY",
             "openai": "OPENAI_API_KEY",
             "claude": "CLAUDE_API_KEY",
-            "llama": "No API key required (uses local Ollama)"
+            "llama": "No API key required (uses local Ollama)",
+            "zhipu": "ZHIPU_API_KEY (or GLM_API_KEY)",
+            "glm": "ZHIPU_API_KEY (or GLM_API_KEY)",
         }
+
 
         required_key = provider_key_map.get(self.provider, "API_KEY")
 

@@ -1,4 +1,4 @@
-﻿name: Stage 3 Benchmark
+name: Stage 3 Benchmark
 
 on:
   workflow_dispatch:
@@ -60,6 +60,8 @@ jobs:
       - name: Run Benchmark (${{ inputs.mode }})
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
         run: |
           bash scripts/run_benchmark_linux.sh "${{ inputs.mode }}" "${{ inputs.model }}"
 

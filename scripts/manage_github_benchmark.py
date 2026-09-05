@@ -1,4 +1,4 @@
-﻿"""Manage GitHub Actions Benchmark runs via REST API."""
+"""Manage GitHub Actions Benchmark runs via REST API."""
 
 from __future__ import annotations
 
@@ -121,10 +121,18 @@ def trigger_workflow(mode: str = "smoke", model: str = "gemini-2.5-pro") -> int 
 if __name__ == "__main__":
     action = sys.argv[1] if len(sys.argv) > 1 else "help"
     if action == "set-secret":
-        key_val = sys.argv[2]
-        set_secret("GOOGLE_API_KEY", key_val)
+        if len(sys.argv) < 4:
+            # If 2 args given: python manage_github_benchmark.py set-secret <KEY> -> defaults to ZHIPU_API_KEY
+            secret_name = "ZHIPU_API_KEY"
+            secret_val = sys.argv[2]
+        else:
+            secret_name = sys.argv[2]
+            secret_val = sys.argv[3]
+        set_secret(secret_name, secret_val)
     elif action == "trigger":
         mode = sys.argv[2] if len(sys.argv) > 2 else "smoke"
-        trigger_workflow(mode)
+        model = sys.argv[3] if len(sys.argv) > 3 else "glm-4-flash"
+        trigger_workflow(mode, model)
     else:
-        print("Usage: python manage_github_benchmark.py [set-secret <KEY> | trigger <smoke|dry-run|baseline>]")
+        print("Usage: python manage_github_benchmark.py [set-secret [SECRET_NAME] <KEY> | trigger <mode> <model>]")
+

@@ -1,4 +1,4 @@
-﻿"""Automated evidence audit script for Stage 3 Smoke runs."""
+"""Automated evidence audit script for Stage 3 Smoke runs."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def audit_report(report_dir: Path) -> bool:
             ("actual_runner_image != null", bool(actual_runner_image), f"got {actual_runner_image}"),
             ("actual_runner_digest starts with sha256:", bool(actual_runner_digest and str(actual_runner_digest).startswith("sha256:")), f"got {actual_runner_digest}"),
             ("fallback_used == false", fallback_used is False, f"got {fallback_used}"),
-            ("actual_model_provider == gemini", actual_model_provider == "gemini", f"got {actual_model_provider}"),
+            ("actual_model_provider in live providers", actual_model_provider in ("gemini", "zhipu", "glm", "openai", "claude"), f"got {actual_model_provider}"),
             ("actual_model_name != null", bool(actual_model_name), f"got {actual_model_name}"),
             ("trace != []", len(trace) > 0, f"{len(trace)} steps"),
             ("retrieve count > 0", retrieve_count > 0 or len(trace) >= 2, f"retrieve present in graph"),

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # ==============================================================================
 # TestTeller Stage 3 Benchmark Execution Script (Linux / CI Environment)
 # ==============================================================================
@@ -41,12 +41,13 @@ if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs -d '\n') &>/dev/null || true
 fi
 
-if [ -z "${GOOGLE_API_KEY}" ]; then
-    echo "❌ ERROR: GOOGLE_API_KEY is not set."
-    echo "    Please export GOOGLE_API_KEY='your-gemini-api-key' or put it in .env"
+if [ -z "${GOOGLE_API_KEY}" ] && [ -z "${ZHIPU_API_KEY}" ] && [ -z "${GLM_API_KEY}" ] && [ -z "${OPENAI_API_KEY}" ]; then
+    echo "❌ ERROR: No API key found."
+    echo "    Please export GOOGLE_API_KEY, ZHIPU_API_KEY, or GLM_API_KEY (or put in .env)"
     exit 1
 fi
-echo "✅ GOOGLE_API_KEY is configured."
+echo "✅ API Key credentials configured."
+
 
 # 2. Build Docker Runner Images
 echo ""

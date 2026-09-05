@@ -7,11 +7,13 @@ from .gemini_client import GeminiClient
 from .openai_client import OpenAIClient
 from .claude_client import ClaudeClient
 from .llama_client import LlamaClient
+from .zhipu_client import ZhipuClient
 
 __all__ = [
     'BaseLLMClient',
     'GeminiClient',
     'OpenAIClient',
     'ClaudeClient',
-    'LlamaClient'
+    'LlamaClient',
+    'ZhipuClient',
 ]
