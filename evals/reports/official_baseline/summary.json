@@ -1,0 +1,126 @@
+{
+  "suite_id": "benchmark_v1",
+  "total_cases": 24,
+  "total_runs": 72,
+  "repeats_per_case": 3,
+  "first_pass_rate": 0.2917,
+  "final_pass_rate": 0.3889,
+  "repair_recovery_rate": 0.1373,
+  "repair_uplift": 0.0972,
+  "semantic_success_rate": 0.1111,
+  "bug_detection_rate": 0.7857,
+  "avg_repair_rounds_all": 1.3472,
+  "avg_repair_rounds_on_repaired": 1.2857,
+  "e2e_latency_p50_ms": 37666.85,
+  "e2e_latency_p95_ms": 88755.69,
+  "sandbox_failure_rate": 0.0139,
+  "failure_distribution": {
+    "missing_dependency": 10,
+    "assertion_failure": 23,
+    "repair_exhausted": 10,
+    "timeout": 1
+  },
+  "category_metrics": {
+    "happy_path": {
+      "total_runs": 12,
+      "first_pass_rate": 0.4167,
+      "final_pass_rate": 0.4167,
+      "semantic_success_rate": 0.25
+    },
+    "boundary_value": {
+      "total_runs": 12,
+      "first_pass_rate": 0.25,
+      "final_pass_rate": 0.4167,
+      "semantic_success_rate": 0.0833
+    },
+    "error_handling": {
+      "total_runs": 12,
+      "first_pass_rate": 0.1667,
+      "final_pass_rate": 0.5,
+      "semantic_success_rate": 0.3333
+    },
+    "concurrency_state": {
+      "total_runs": 12,
+      "first_pass_rate": 0.4167,
+      "final_pass_rate": 0.5,
+      "semantic_success_rate": 0.0
+    },
+    "mock_contract": {
+      "total_runs": 12,
+      "first_pass_rate": 0.4167,
+      "final_pass_rate": 0.4167,
+      "semantic_success_rate": 0.0
+    },
+    "security_injection": {
+      "total_runs": 12,
+      "first_pass_rate": 0.0833,
+      "final_pass_rate": 0.0833,
+      "semantic_success_rate": 0.0
+    }
+  },
+  "difficulty_metrics": {
+    "easy": {
+      "total_runs": 27,
+      "first_pass_rate": 0.2963,
+      "final_pass_rate": 0.4074,
+      "semantic_success_rate": 0.1852
+    },
+    "medium": {
+      "total_runs": 21,
+      "first_pass_rate": 0.3333,
+      "final_pass_rate": 0.4286,
+      "semantic_success_rate": 0.1429
+    },
+    "hard": {
+      "total_runs": 24,
+      "first_pass_rate": 0.25,
+      "final_pass_rate": 0.3333,
+      "semantic_success_rate": 0.0
+    }
+  },
+  "provenance": {
+    "projects": [
+      "oss_project_1",
+      "oss_project_2"
+    ],
+    "target_commits": {
+      "oss_project_1": "4500e3d04288738d25acbb4973eb3c3e1bf41db9",
+      "oss_project_2": "62d7e076e1f7d10ed4d9e13314df32c6a1e80173"
+    },
+    "corpus_hashes": {
+      "oss_project_1": "dc5bd42e5b5fa07fc6d76bc736278e8e24845f0a8efd53291a2095d36b8019d6",
+      "oss_project_2": "7dca916568d5ef74281462e9ccffbaecf583983a6893b2d82edcc6aa02c8ef71"
+    },
+    "testteller_commit": "5f3e80c3cf6c5ba764f9dbb34305fab068802651",
+    "actual_backends": [
+      "docker"
+    ],
+    "actual_backend": "docker",
+    "actual_runner_images": [
+      "testteller-runner-python:3.11-v1"
+    ],
+    "actual_runner_image": "testteller-runner-python:3.11-v1",
+    "actual_runner_digests": [
+      "sha256:2049fafd14858c6090ecada28df35ea4ec57d2cf1b48225ebc5b1345b3051f68"
+    ],
+    "actual_runner_digest": "sha256:2049fafd14858c6090ecada28df35ea4ec57d2cf1b48225ebc5b1345b3051f68",
+    "actual_model_providers": [
+      "zhipu"
+    ],
+    "actual_model_provider": "zhipu",
+    "actual_model_names": [
+      "glm-4-flash"
+    ],
+    "actual_model_name": "glm-4-flash",
+    "fallback_used": false,
+    "rag_collections": [
+      "benchmark_v1_oss_project_1_4500e3d0",
+      "benchmark_v1_oss_project_2_62d7e076"
+    ],
+    "project_name": "oss_project_1, oss_project_2",
+    "commit_sha": "oss_project_1@4500e3d0, oss_project_2@62d7e076",
+    "runner_image": "testteller-runner-python:3.11-v1",
+    "model_name": "glm-4-flash",
+    "corpus_hash": "oss_project_1:dc5bd42e, oss_project_2:7dca9165"
+  }
+}

@@ -133,3 +133,5 @@ testteller_cli*
 evals/projects/cache/
 evals/reports/*
 !evals/reports/.gitkeep
+!evals/reports/official_baseline/
+!evals/reports/official_baseline/**
