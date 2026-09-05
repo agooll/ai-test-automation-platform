@@ -404,30 +404,30 @@
 
     };
 
-    es.onmessage = (e) => {
+    const processedKeys = new Set();
+    const safeHandle = (e) => {
       try {
         const data = JSON.parse(e.data);
+        const dedupeKey = `${e.lastEventId || ""}_${data.event}_${data.timestamp || ""}_${data.node || ""}_${data.repair_round || ""}`;
+        if (processedKeys.has(dedupeKey)) return;
+        processedKeys.add(dedupeKey);
         handleEvent(data);
       } catch (err) {
         console.warn("Parse SSE error:", err);
       }
     };
 
-    // Also register specific named event listeners
+    es.onmessage = safeHandle;
+
+    // Register specific named event listeners
     [
       "RUN_STARTED", "PLAN_COMPLETED", "RETRIEVE_COMPLETED", "GENERATE_COMPLETED",
       "EXECUTE_COMPLETED", "ANALYZE_FAILURE_COMPLETED", "REPAIR_COMPLETED",
       "WAITING_REVIEW", "RUN_RESUMED", "REVIEW_COMPLETED", "RUN_COMPLETED", "RUN_ERROR"
     ].forEach(eventName => {
-      es.addEventListener(eventName, (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          handleEvent(data);
-        } catch (err) {
-          console.warn("Parse SSE event error:", err);
-        }
-      });
+      es.addEventListener(eventName, safeHandle);
     });
+
 
     es.onerror = () => {
       // EventSource reconnects automatically on network drop

@@ -166,3 +166,77 @@ async def test_agent_run_hitl_resume(tmp_path: Path):
             assert event_types.count("RUN_COMPLETED") == 1
 
 
+@pytest.mark.asyncio
+async def test_sse_event_ordering_and_review_decoupling(tmp_path: Path):
+    sample_file = tmp_path / "test.md"
+    sample_file.write_text("# Test\n## TC1\nSteps: 1\n", encoding="utf-8")
+
+    async def fake_generator(state):
+        return {"test_run.py": "def test_f():\n    assert True\n"}
+
+    workflow = AgenticTestWorkflow(generator=fake_generator)
+
+    fake_prepared = PreparedAgentRun(
+        task_id="test-task-ordering",
+        workspace=tmp_path,
+        trace_path=tmp_path / "trace.jsonl",
+        language="python",
+        framework="pytest",
+        test_command=["python", "-m", "pytest", "-q"],
+        test_cases=[],
+        llm_manager=None,
+        vector_store=AsyncMock(close=AsyncMock()),
+        workflow=workflow,
+        initial_state={
+            "task_id": "test-task-ordering",
+            "workspace": str(tmp_path),
+            "test_command": ["python", "-m", "pytest", "-q"],
+            "human_review": False,
+        },
+    )
+
+    with patch("testteller.web.app.prepare_agent_run", return_value=fake_prepared):
+        with TestClient(app) as client:
+            res = client.post("/api/agent-runs", json={
+                "input_file": str(sample_file),
+                "framework": "pytest",
+            })
+            assert res.status_code == 200
+            task_id = res.json()["task_id"]
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                info = client.get(f"/api/agent-runs/{task_id}").json()
+                if info["status"] in ("PASS", "FAILED", "ERROR"):
+                    break
+
+            sse_res = client.get(f"/api/agent-runs/{task_id}/events")
+            assert sse_res.status_code == 200
+            sse_content = sse_res.text
+            sse_events = [line.split("event: ")[1].strip() for line in sse_content.splitlines() if line.startswith("event: ")]
+
+            # 1. Zero duplication assertion on SSE replay stream
+            assert sse_events.count("RUN_STARTED") == 1
+            assert sse_events.count("RUN_COMPLETED") == 1
+
+            # 2. Strict sequential order: review completed occurs BEFORE run completed
+            assert "REVIEW_COMPLETED" in sse_events
+            assert "RUN_COMPLETED" in sse_events
+            idx_review = sse_events.index("REVIEW_COMPLETED")
+            idx_completed = sse_events.index("RUN_COMPLETED")
+            assert idx_review < idx_completed, "REVIEW_COMPLETED must arrive before RUN_COMPLETED"
+
+            # 3. Payload contract verification:
+            # REVIEW_COMPLETED payload contains 'verdict', RUN_COMPLETED payload contains 'final_verdict'
+            job = job_manager.get_job(task_id)
+            assert job is not None
+            review_events = [e for e in job.events_history if e.get("event") == "REVIEW_COMPLETED"]
+            completed_events = [e for e in job.events_history if e.get("event") == "RUN_COMPLETED"]
+            assert len(review_events) == 1
+            assert len(completed_events) == 1
+            assert "verdict" in review_events[0]
+            assert "final_verdict" in completed_events[0]
+            assert completed_events[0]["final_verdict"] == "PASS"
+
+
+
