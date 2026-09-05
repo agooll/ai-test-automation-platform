@@ -130,6 +130,15 @@ class AgentJobManager:
 
         async def event_sink(event_data: dict[str, Any]) -> None:
             if job:
+                ev_type = event_data.get("event")
+                if ev_type == "RUN_STARTED":
+                    job.status = "RUNNING"
+                elif ev_type == "WAITING_REVIEW":
+                    job.status = "WAITING_REVIEW"
+                elif ev_type == "RUN_COMPLETED":
+                    verdict = event_data.get("final_verdict")
+                    if verdict:
+                        job.status = verdict
                 await job.emit(event_data)
 
         config = AgentRunConfig(
@@ -150,36 +159,23 @@ class AgentJobManager:
         return job
 
     async def _run_job(self, job: AgentJob) -> None:
-        job.status = "RUNNING"
-        await job.emit({"event": "RUN_STARTED", "task_id": job.task_id})
         try:
             prepared: PreparedAgentRun = await prepare_agent_run(job.config)
             job.workflow = prepared.workflow
             job.vector_store = prepared.vector_store
+            if not job.workflow.event_sink:
+                job.workflow.event_sink = job.config.event_sink
 
             result = await prepared.workflow.run(prepared.initial_state, thread_id=job.task_id)
             job.result = result
 
             if "__interrupt__" in result:
                 job.status = "WAITING_REVIEW"
-                await job.emit({
-                    "event": "WAITING_REVIEW",
-                    "task_id": job.task_id,
-                    "repair_history": result.get("repair_history", []),
-                    "execution_result": result.get("execution_result", {}),
-                })
             else:
                 verdict = result.get("final_verdict")
                 if not verdict:
                     verdict = "PASS" if result.get("execution_success") else "FAILED"
                 job.status = verdict
-                await job.emit({
-                    "event": "RUN_COMPLETED",
-                    "task_id": job.task_id,
-                    "final_verdict": job.status,
-                    "repair_history": result.get("repair_history", []),
-                    "result": result,
-                })
                 await _safe_close(prepared.workflow)
                 await _safe_close(prepared.vector_store)
         except Exception as e:
@@ -198,7 +194,6 @@ class AgentJobManager:
             raise HTTPException(400, f"Task is not waiting for review (status: {job.status})")
 
         job.status = "RUNNING"
-        await job.emit({"event": "RUN_RESUMED", "task_id": task_id, "decision": decision})
         try:
             result = await job.workflow.resume(task_id, decision)
             job.result = result
@@ -206,13 +201,6 @@ class AgentJobManager:
             if not verdict:
                 verdict = "PASS" if result.get("execution_success") else "FAILED"
             job.status = verdict
-            await job.emit({
-                "event": "RUN_COMPLETED",
-                "task_id": task_id,
-                "final_verdict": job.status,
-                "repair_history": result.get("repair_history", []),
-                "result": result,
-            })
             return {"task_id": task_id, "status": job.status, "result": result}
         except Exception as e:
             logger.exception("Error resuming agent job: %s", e)
@@ -223,6 +211,7 @@ class AgentJobManager:
         finally:
             await _safe_close(job.workflow)
             await _safe_close(job.vector_store)
+
 
 
 

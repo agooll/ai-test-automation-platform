@@ -374,11 +374,19 @@
         updateStatusBadge("RUNNING");
         setNodeState("review", "running");
         showToast(`已提交决策: ${evData.decision}`);
-      } else if (evType === "REVIEW_COMPLETED" || evType === "RUN_COMPLETED") {
+      } else if (evType === "REVIEW_COMPLETED") {
+        const v = evData.verdict;
+        if (v === "PASS" || v === "APPROVED" || v === "MANUAL_APPROVED") {
+          setNodeState("review", "passed");
+        } else if (v === "REJECTED" || v === "NEEDS_REVIEW") {
+          setNodeState("review", "failed");
+        }
+        // Do NOT close SSE here; let persist node complete and RUN_COMPLETED / WAITING_REVIEW finalize.
+      } else if (evType === "RUN_COMPLETED") {
         hitlBanner.style.display = "none";
         const verdict = evData.final_verdict || "COMPLETED";
         updateStatusBadge(verdict);
-        if (verdict === "PASS" || verdict === "APPROVED") {
+        if (verdict === "PASS" || verdict === "APPROVED" || verdict === "MANUAL_APPROVED") {
           setNodeState("review", "passed");
         } else {
           setNodeState("review", "failed");
@@ -393,6 +401,7 @@
         showToast(`执行发生异常: ${evData.error}`);
         es.close();
       }
+
     };
 
     es.onmessage = (e) => {
