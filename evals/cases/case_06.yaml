@@ -1,0 +1,16 @@
+case_id: case_06
+project_name: oss_project_1
+category: error_handling
+difficulty: easy
+split: dev
+requirement_path: evals/requirements/req_case_06.md
+target_entrypoint: cachetools.Cache.__getitem__
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_06
+  description: Cache.__getitem__ returns None on KeyError instead of propagating
+  patch_path: evals/mutants/mut_case_06.patch
+tags:
+- error_handling
+- easy
+- dev

@@ -1,0 +1,16 @@
+case_id: case_07
+project_name: oss_project_1
+category: concurrency_state
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_07.md
+target_entrypoint: cachetools.LFUCache
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_07
+  description: LFUCache fails to increment hit count on getitem
+  patch_path: evals/mutants/mut_case_07.patch
+tags:
+- concurrency_state
+- hard
+- holdout

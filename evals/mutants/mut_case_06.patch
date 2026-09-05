@@ -1,0 +1,7 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -74,3 +74,3 @@
+-        except KeyError:
+-            return self.__missing__(key)
++        except KeyError:
++            return None

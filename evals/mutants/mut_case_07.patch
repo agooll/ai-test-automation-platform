@@ -1,0 +1,5 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -236,3 +236,2 @@
+-        if key in self:  # __missing__ may not store item
+-            self.__touch(key)

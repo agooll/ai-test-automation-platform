@@ -31,23 +31,57 @@ class ExistingRAGAdapter:
 
     async def retrieve(self, state: AgentState) -> list[dict[str, Any]]:
         query = state.get("requirement") or " ".join(case.objective for case in self.test_cases)
-        result = await self.generator.knowledge_extractor.vector_store.query_collection(
-            query, n_results=self.generator.num_context_docs
-        )
-        return [
-            {
-                "id": item.get("id"),
-                "content": item.get("document", ""),
-                "metadata": item.get("metadata", {}),
-                "distance": item.get("distance"),
-                "source": item.get("metadata", {}).get("source")
-                or item.get("metadata", {}).get("file_path"),
-            }
-            for item in result
-        ]
+        vs = self.generator.knowledge_extractor.vector_store
+        try:
+            if hasattr(vs, "query_similar"):
+                raw = await asyncio.to_thread(vs.query_similar, query, n_results=self.generator.num_context_docs)
+                docs = raw.get("documents", [[]])[0] if raw.get("documents") else []
+                metas = raw.get("metadatas", [[]])[0] if raw.get("metadatas") else []
+                dists = raw.get("distances", [[]])[0] if raw.get("distances") else []
+                ids = raw.get("ids", [[]])[0] if raw.get("ids") else []
+                return [
+                    {
+                        "id": ids[i] if i < len(ids) else f"doc_{i}",
+                        "content": docs[i] if i < len(docs) else "",
+                        "metadata": metas[i] if i < len(metas) and metas[i] else {},
+                        "distance": dists[i] if i < len(dists) else 0.0,
+                        "source": (metas[i].get("source") or metas[i].get("file_path") or "") if i < len(metas) and metas[i] else "",
+                    }
+                    for i in range(len(docs))
+                ]
+            elif hasattr(vs, "query_collection"):
+                res = await vs.query_collection(query, n_results=self.generator.num_context_docs)
+                return [
+                    {
+                        "id": item.get("id"),
+                        "content": item.get("document", item.get("content", "")),
+                        "metadata": item.get("metadata", {}),
+                        "distance": item.get("distance"),
+                        "source": item.get("metadata", {}).get("source") or item.get("metadata", {}).get("file_path"),
+                    }
+                    for item in res
+                ]
+        except Exception:
+            pass
+        return []
 
     async def generate(self, state: AgentState) -> dict[str, str]:
-        return await self.generator.generate(self.test_cases)
+        try:
+            files = await self.generator.generate(self.test_cases)
+        except Exception:
+            files = {}
+
+        if not files:
+            files = self.generator._generate_fallback_files(self.test_cases)
+
+        # Standardize paths under tests/ directory so pytest discovers them
+        mapped = {}
+        for k, v in files.items():
+            if not k.startswith("tests/") and not k.startswith("tests\\"):
+                mapped[f"tests/{k}"] = v
+            else:
+                mapped[k] = v
+        return mapped
 
     async def repair(self, state: AgentState) -> dict[str, str]:
         files = dict(state.get("generated_files", {}))

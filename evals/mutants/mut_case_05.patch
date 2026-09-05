@@ -1,0 +1,5 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -53,3 +53,2 @@
+-        if maxsize < 0:
+-            raise ValueError("maxsize must be non-negative")

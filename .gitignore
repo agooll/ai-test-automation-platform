@@ -128,4 +128,8 @@ iavipro/
 testteller_generated_tests/
 testteller_automated_tests/
 testteller_cli*
-EOF < /dev/null
+
+# Benchmark runtime and cache
+evals/projects/cache/
+evals/reports/*
+!evals/reports/.gitkeep

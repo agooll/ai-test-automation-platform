@@ -1,0 +1,16 @@
+case_id: case_18
+project_name: oss_project_2
+category: error_handling
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_18.md
+target_entrypoint: bottle.redirect
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_18
+  description: redirect forces status 200 instead of 302
+  patch_path: evals/mutants/mut_case_18.patch
+tags:
+- error_handling
+- hard
+- holdout

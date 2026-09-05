@@ -1,0 +1,17 @@
+case_id: case_24
+project_name: oss_project_2
+category: security_injection
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_24.md
+target_entrypoint: bottle.Request.get_cookie
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_24
+  description: get_cookie ignores signature verification and returns raw tampered
+    cookie
+  patch_path: evals/mutants/mut_case_24.patch
+tags:
+- security_injection
+- hard
+- holdout

@@ -42,16 +42,21 @@ class BaseTestGenerator(ABC):
         pass
     
     def categorize_tests(self, test_cases: List[TestCase]) -> Dict[str, List[TestCase]]:
-        """Categorize test cases by type."""
+        """Categorize test cases by type or explicit category."""
         categories = {
             'e2e': [],
             'integration': [],
             'technical': [],
-            'mocked': []
+            'mocked': [],
+            'unit': []
         }
         
         for test_case in test_cases:
-            if test_case.id.startswith('E2E_'):
+            cat = getattr(test_case, 'category', None)
+            if cat:
+                cat_key = str(cat).lower()
+                categories.setdefault(cat_key, []).append(test_case)
+            elif test_case.id.startswith('E2E_'):
                 categories['e2e'].append(test_case)
             elif test_case.id.startswith('INT_'):
                 categories['integration'].append(test_case)
@@ -59,8 +64,10 @@ class BaseTestGenerator(ABC):
                 categories['technical'].append(test_case)
             elif test_case.id.startswith('MOCK_'):
                 categories['mocked'].append(test_case)
+            else:
+                categories['unit'].append(test_case)
         
-        return categories
+        return {k: v for k, v in categories.items() if v}
     
     def sanitize_test_name(self, name: str) -> str:
         """Convert test ID or feature name to valid function/method name."""

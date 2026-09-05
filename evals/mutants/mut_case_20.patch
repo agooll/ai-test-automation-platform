@@ -1,0 +1,5 @@
+--- a/bottle.py
++++ b/bottle.py
+@@ -1763,3 +1763,3 @@
+-        return key.title()
++        return key

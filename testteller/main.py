@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import json
 from functools import wraps
 
@@ -33,6 +34,12 @@ try:
     HAS_AGENT_RUNTIME = True
 except ImportError:
     HAS_AGENT_RUNTIME = False
+
+try:
+    from testteller.benchmark.cli import benchmark_command
+    HAS_BENCHMARK = True
+except ImportError:
+    HAS_BENCHMARK = False
 
 
 setup_logging()
@@ -1073,6 +1080,29 @@ if HAS_AGENT_RUNTIME:
         )
 
 
+if HAS_BENCHMARK:
+    @app.command("benchmark")
+    def benchmark(
+        suite: Annotated[str, typer.Option("--suite", "-s", help="Suite YAML file path or suite ID")] = "evals/suites/smoke_v1.yaml",
+        repeats: Annotated[int, typer.Option("--repeats", "-r", min=1, help="Repeats per benchmark case")] = None,
+        backend: Annotated[str, typer.Option("--backend", "-b", help="Execution backend: docker or local")] = "docker",
+        output_dir: Annotated[str, typer.Option("--output-dir", "-o", help="Output directory for benchmark reports")] = None,
+        model: Annotated[str, typer.Option("--model", "-m", help="Evaluation model name")] = "gemini-2.5-pro",
+        allow_fallback: Annotated[bool, typer.Option("--allow-fallback", help="Allow fallback to offline mock LLM client (disallowed in formal benchmark)")] = False,
+    ):
+        """Run the TestTeller Benchmark Suite and generate multi-format evaluation reports."""
+        ret = benchmark_command(
+            suite=suite,
+            repeats=repeats,
+            backend=backend,
+            output_dir=output_dir,
+            model=model,
+            allow_fallback=allow_fallback,
+        )
+        if ret != 0:
+            raise typer.Exit(code=ret)
+
+
 @app.callback()
 def main(
     _: Annotated[bool, typer.Option(
@@ -1091,6 +1121,12 @@ def app_runner():
     This function is the entry point for the CLI script defined in pyproject.toml.
     It ensures logging is set up and then runs the Typer application.
     """
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     try:
         app()
     except Exception as e:

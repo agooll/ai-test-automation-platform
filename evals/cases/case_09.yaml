@@ -1,0 +1,16 @@
+case_id: case_09
+project_name: oss_project_1
+category: mock_contract
+difficulty: medium
+split: dev
+requirement_path: evals/requirements/req_case_09.md
+target_entrypoint: cachetools.cached
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_09
+  description: '@cached always calls underlying wrapper bypassing cache lookup'
+  patch_path: evals/mutants/mut_case_09.patch
+tags:
+- mock_contract
+- medium
+- dev

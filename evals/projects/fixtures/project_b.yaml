@@ -1,0 +1,7 @@
+name: project_b
+repo_path: evals/projects/repos/project_b
+commit_sha: 403c0476984d76bd179eff56b1150fa98d4f247b
+language: python
+test_framework: pytest
+setup_commands: []
+target_service: null

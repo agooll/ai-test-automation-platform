@@ -1,0 +1,17 @@
+case_id: case_23
+project_name: oss_project_2
+category: security_injection
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_23.md
+target_entrypoint: bottle.static_file
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_23
+  description: static_file removes path traversal check allowing parent directory
+    access
+  patch_path: evals/mutants/mut_case_23.patch
+tags:
+- security_injection
+- hard
+- holdout

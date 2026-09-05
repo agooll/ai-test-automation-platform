@@ -1,0 +1,5 @@
+--- a/bottle.py
++++ b/bottle.py
+@@ -1420,3 +1420,3 @@
+-                pairs.append((k, v))
++                if v: pairs.append((k, v))

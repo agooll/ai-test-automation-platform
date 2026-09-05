@@ -1,0 +1,8 @@
+name: oss_project_2
+repo_url: https://github.com/bottlepy/bottle.git
+repo_path: evals/projects/cache/bottle
+commit_sha: 62d7e076e1f7d10ed4d9e13314df32c6a1e80173
+language: python
+test_framework: pytest
+setup_commands: []
+target_service: null

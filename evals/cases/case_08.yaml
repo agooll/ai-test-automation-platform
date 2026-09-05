@@ -1,0 +1,16 @@
+case_id: case_08
+project_name: oss_project_1
+category: concurrency_state
+difficulty: medium
+split: dev
+requirement_path: evals/requirements/req_case_08.md
+target_entrypoint: cachetools.RRCache
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_08
+  description: RRCache popitem removes nothing
+  patch_path: evals/mutants/mut_case_08.patch
+tags:
+- concurrency_state
+- medium
+- dev

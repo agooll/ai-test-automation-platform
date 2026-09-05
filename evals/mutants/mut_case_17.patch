@@ -1,0 +1,7 @@
+--- a/bottle.py
++++ b/bottle.py
+@@ -2714,3 +2714,3 @@
+-def abort(code=500, text='Unknown Error.'):
+-    raise HTTPError(code, text)
++def abort(code=500, text='Unknown Error.'):
++    raise HTTPError(500, text)

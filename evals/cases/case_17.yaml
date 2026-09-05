@@ -1,0 +1,16 @@
+case_id: case_17
+project_name: oss_project_2
+category: error_handling
+difficulty: easy
+split: dev
+requirement_path: evals/requirements/req_case_17.md
+target_entrypoint: bottle.abort
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_17
+  description: abort forces status code 500 regardless of argument
+  patch_path: evals/mutants/mut_case_17.patch
+tags:
+- error_handling
+- easy
+- dev

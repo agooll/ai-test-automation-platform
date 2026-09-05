@@ -1,0 +1,16 @@
+case_id: case_16
+project_name: oss_project_2
+category: boundary_value
+difficulty: medium
+split: dev
+requirement_path: evals/requirements/req_case_16.md
+target_entrypoint: bottle.Request.query
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_16
+  description: Query parsing drops parameters with empty values
+  patch_path: evals/mutants/mut_case_16.patch
+tags:
+- boundary_value
+- medium
+- dev

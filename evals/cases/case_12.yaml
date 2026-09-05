@@ -1,0 +1,16 @@
+case_id: case_12
+project_name: oss_project_1
+category: security_injection
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_12.md
+target_entrypoint: cachetools.Cache.popitem
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_12
+  description: LRUCache.popitem returns None instead of raising KeyError when empty
+  patch_path: evals/mutants/mut_case_12.patch
+tags:
+- security_injection
+- hard
+- holdout

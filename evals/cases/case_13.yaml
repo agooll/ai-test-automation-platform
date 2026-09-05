@@ -1,0 +1,16 @@
+case_id: case_13
+project_name: oss_project_2
+category: happy_path
+difficulty: easy
+split: dev
+requirement_path: evals/requirements/req_case_13.md
+target_entrypoint: bottle.Bottle.route
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_13
+  description: Bottle._handle ignores handler return value and returns empty body
+  patch_path: evals/mutants/mut_case_13.patch
+tags:
+- happy_path
+- easy
+- dev

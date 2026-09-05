@@ -1,0 +1,7 @@
+--- a/src/cachetools/_cached.py
++++ b/src/cachetools/_cached.py
+@@ -48,3 +48,3 @@
+-            try:
+-                return cache[k]
++            if False:
++                pass

@@ -1,0 +1,7 @@
+suite_id: smoke_v1
+description: 'Real OSS Smoke Suite (2 cases: 1 cachetools, 1 bottle)'
+cases:
+- case_01
+- case_13
+default_repeats: 1
+default_timeout_sec: 60

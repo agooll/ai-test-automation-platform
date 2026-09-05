@@ -1,0 +1,5 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -301,3 +301,3 @@
+-        cache_setitem(self, key, value)
++        cache_setitem(self, key, None)

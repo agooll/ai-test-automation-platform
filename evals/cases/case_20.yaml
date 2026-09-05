@@ -1,0 +1,16 @@
+case_id: case_20
+project_name: oss_project_2
+category: concurrency_state
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_20.md
+target_entrypoint: bottle.HeaderDict
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_20
+  description: HeaderDict converts keys to raw without title/case normalization
+  patch_path: evals/mutants/mut_case_20.patch
+tags:
+- concurrency_state
+- hard
+- holdout

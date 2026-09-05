@@ -1,0 +1,5 @@
+--- a/src/cachetools/keys.py
++++ b/src/cachetools/keys.py
+@@ -52,3 +52,3 @@
+-            key += (type(v), v)
++            key += (v,)

@@ -1,0 +1,16 @@
+case_id: case_22
+project_name: oss_project_2
+category: mock_contract
+difficulty: hard
+split: holdout
+requirement_path: evals/requirements/req_case_22.md
+target_entrypoint: bottle.FormsDict.decode
+timeout_sec: 60
+mutants:
+- mutant_id: mut_case_22
+  description: FormsDict.decode returns raw bytes without decoding
+  patch_path: evals/mutants/mut_case_22.patch
+tags:
+- mock_contract
+- hard
+- holdout

@@ -1,0 +1,5 @@
+--- a/src/cachetools/keys.py
++++ b/src/cachetools/keys.py
+@@ -32,3 +32,3 @@
+-        return _HashedTuple(key)
++        return _HashedTuple(key + (object(),))

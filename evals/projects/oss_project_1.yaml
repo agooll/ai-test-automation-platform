@@ -1,0 +1,8 @@
+name: oss_project_1
+repo_url: https://github.com/tkem/cachetools.git
+repo_path: evals/projects/cache/cachetools
+commit_sha: 4500e3d04288738d25acbb4973eb3c3e1bf41db9
+language: python
+test_framework: pytest
+setup_commands: []
+target_service: null

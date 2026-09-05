@@ -1,0 +1,7 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -312,3 +312,3 @@
+-        except StopIteration:
+-            raise KeyError("%s is empty" % type(self).__name__) from None
++        except StopIteration:
++            return None

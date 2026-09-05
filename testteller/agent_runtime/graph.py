@@ -165,8 +165,9 @@ class AgenticTestWorkflow:
         return self._record(state, "plan", {"test_plan": result})
 
     async def _generate_node(self, state: AgentState) -> AgentState:
+        ws = state.get("workspace") or state.get("workspace_dir") or ""
         files = await _maybe_call(self.generator, state)
-        write_result = await self.tools.invoke("write_files", workspace=state["workspace"], files=files)
+        write_result = await self.tools.invoke("write_files", workspace=ws, files=files)
         update: AgentState = {"generated_files": files, "generation_success": write_result.ok}
         if not write_result.ok:
             update["error"] = write_result.error
@@ -177,9 +178,12 @@ class AgenticTestWorkflow:
         return self._record(state, "retrieve", {"retrieved_context": context})
 
     async def _execute_node(self, state: AgentState) -> AgentState:
+        ws = state.get("workspace") or state.get("workspace_dir") or ""
+        framework = state.get("framework") or state.get("test_framework") or "pytest"
+        cmd = state.get("test_command") or (["pytest", "-v", "tests"] if framework == "pytest" else ["npm", "test"])
         result = await self.tools.invoke(
-            "run_tests", workspace=state["workspace"], command=state["test_command"],
-            framework=state.get("framework", "pytest"), task_id=state.get("task_id"),
+            "run_tests", workspace=ws, command=cmd,
+            framework=framework, task_id=state.get("task_id"),
         )
         execution = result.data if result.ok else {"passed": False, "error": result.error}
         passed = bool(execution.get("passed"))
@@ -209,9 +213,10 @@ class AgenticTestWorkflow:
         return self._record(state, "analyze_failure", {"failure_analysis": analysis})
 
     async def _repair_node(self, state: AgentState) -> AgentState:
+        ws = state.get("workspace") or state.get("workspace_dir") or ""
         before_files = dict(state.get("generated_files", {}))
         repaired_files = await _maybe_call(self.repairer, state)
-        write_result = await self.tools.invoke("write_files", workspace=state["workspace"], files=repaired_files)
+        write_result = await self.tools.invoke("write_files", workspace=ws, files=repaired_files)
         round_num = state.get("repair_round", 0) + 1
 
         # Compute unified diffs for all modified, added, or deleted files

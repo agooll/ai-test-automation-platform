@@ -1,0 +1,5 @@
+--- a/bottle.py
++++ b/bottle.py
+@@ -480,3 +480,3 @@
+-        methods = self.methods.get(method) or self.methods.get('*')
++        methods = next(iter(self.methods.values()))

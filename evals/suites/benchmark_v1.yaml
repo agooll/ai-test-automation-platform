@@ -1,0 +1,30 @@
+suite_id: benchmark_v1
+description: Comprehensive TestTeller Benchmark v1 (24 Real OSS Cases on cachetools
+  & bottle)
+cases:
+- case_01
+- case_02
+- case_03
+- case_04
+- case_05
+- case_06
+- case_07
+- case_08
+- case_09
+- case_10
+- case_11
+- case_12
+- case_13
+- case_14
+- case_15
+- case_16
+- case_17
+- case_18
+- case_19
+- case_20
+- case_21
+- case_22
+- case_23
+- case_24
+default_repeats: 3
+default_timeout_sec: 60

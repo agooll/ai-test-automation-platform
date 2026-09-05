@@ -1,0 +1,6 @@
+--- a/src/cachetools/__init__.py
++++ b/src/cachetools/__init__.py
+@@ -86,3 +86,3 @@
+-            while self.__currsize + diffsize > maxsize:
+-                self.popitem()
++            pass
