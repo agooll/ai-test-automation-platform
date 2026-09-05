@@ -48,4 +48,40 @@ jobs:
         file: ./coverage.xml
         flags: unit
         name: unit-tests-${{ matrix.python-version }}
-        fail_ci_if_error: false 
+        fail_ci_if_error: false
+
+  docker-integration:
+    name: Docker Sandbox Integration
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libpoppler-cpp-dev tesseract-ocr
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+        pip install -r requirements.txt
+        pip install -e .
+
+    - name: Build Runner Docker Images
+      run: |
+        python docker/build_runners.py
+
+    - name: Verify Built Runner Images
+      run: |
+        docker images | grep testteller-runner
+
+    - name: Run Real Docker Sandbox Integration Tests
+      run: |
+        pytest tests/integration/test_docker_sandbox_real.py -v -s
+ 

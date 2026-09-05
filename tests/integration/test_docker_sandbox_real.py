@@ -184,6 +184,8 @@ def test_real_docker_target_only_closed_loop(tmp_path: Path):
             container_name=f"target_{tmp_path.name[:8]}",
             command=["python", "-m", "http.server", "8000"],
         )
+        import time
+        time.sleep(1)
 
         WorkspaceArtifacts(tmp_path).write_files({
             "test_target.py": """
