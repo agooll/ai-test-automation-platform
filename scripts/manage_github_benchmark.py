@@ -15,7 +15,13 @@ import urllib.error
 import nacl.encoding
 import nacl.public
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 REPO = "agooll/ai-test-automation-platform"
+
 
 def get_github_token() -> str:
     """Retrieve GitHub token from env var or git credential helper."""
