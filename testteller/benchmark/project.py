@@ -131,7 +131,25 @@ class BenchmarkProjectManager:
                 encoding="utf-8",
             )
 
+        try:
+            os.chmod(destination_dir, 0o777)
+
+            for root, dirs, files in os.walk(destination_dir):
+                for d in dirs:
+                    try:
+                        os.chmod(os.path.join(root, d), 0o777)
+                    except Exception:
+                        pass
+                for f in files:
+                    try:
+                        os.chmod(os.path.join(root, f), 0o777)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         return destination_dir
+
 
     def compute_corpus_hash(self, manifest: ProjectManifest) -> str:
         """Compute deterministic SHA256 corpus hash across all source files of the project."""

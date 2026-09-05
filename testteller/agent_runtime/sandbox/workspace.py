@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import shutil
 import tempfile
 import uuid
+
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,7 @@ class PerRunWorkspace:
                         pass
                 for f in files:
                     try:
-                        os.chmod(os.path.join(root, f), 0o666)
+                        os.chmod(os.path.join(root, f), 0o777)
                     except Exception:
                         pass
         except Exception:
