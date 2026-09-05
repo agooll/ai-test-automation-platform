@@ -264,12 +264,17 @@ Verify that User Service correctly communicates with Order Service.
             )
         assert exc_info.value.exit_code == 1
     
+    @patch('testteller.automator_agent.cli.QualityGate')
     @patch('testteller.automator_agent.cli.initialize_vector_store')
     @patch('testteller.automator_agent.cli.LLMManager')
     @patch('testteller.automator_agent.cli.UnifiedDocumentParser')
     @patch('testteller.automator_agent.cli.RAGEnhancedTestGenerator')
-    def test_automate_command_with_vector_store_context(self, mock_rag_gen, mock_parser, mock_llm, mock_vector_store):
+    def test_automate_command_with_vector_store_context(self, mock_rag_gen, mock_parser, mock_llm, mock_vector_store, mock_gate_class):
         """Test automate command uses vector store for context."""
+        mock_gate = Mock()
+        mock_gate.evaluate_cases = AsyncMock(return_value=Mock(status="PASS", hard_rule_errors=[], coverage_findings=[]))
+        mock_gate_class.return_value = mock_gate
+
         output_dir = self.temp_dir / "output"
         
         # Mock vector store with application context
@@ -330,13 +335,18 @@ def test_get_user(base_url, auth_token):
             if e.exit_code != 0:
                 pytest.fail(f"Command failed with exit code {e.exit_code}")
     
+    @patch('testteller.automator_agent.cli.QualityGate')
     @patch('testteller.automator_agent.cli.initialize_vector_store')
     @patch('testteller.automator_agent.cli.LLMManager')
     @patch('testteller.automator_agent.cli.UnifiedDocumentParser')
     @patch('testteller.automator_agent.cli.RAGEnhancedTestGenerator')
     @patch('typer.prompt')
-    def test_automate_command_interactive_selection(self, mock_prompt, mock_rag_gen, mock_parser, mock_llm, mock_vector_store):
+    def test_automate_command_interactive_selection(self, mock_prompt, mock_rag_gen, mock_parser, mock_llm, mock_vector_store, mock_gate_class):
         """Test automate command with interactive test selection."""
+        mock_gate = Mock()
+        mock_gate.evaluate_cases = AsyncMock(return_value=Mock(status="PASS", hard_rule_errors=[], coverage_findings=[]))
+        mock_gate_class.return_value = mock_gate
+
         # Mock user selections for interactive test selection
         mock_prompt.return_value = "1,2"  # Select tests 1,2
         
@@ -389,12 +399,17 @@ def test_get_user(base_url, auth_token):
             if e.exit_code != 0:
                 pytest.fail(f"Command failed with exit code {e.exit_code}")
     
+    @patch('testteller.automator_agent.cli.QualityGate')
     @patch('testteller.automator_agent.cli.initialize_vector_store')
     @patch('testteller.automator_agent.cli.LLMManager')
     @patch('testteller.automator_agent.cli.UnifiedDocumentParser')
     @patch('testteller.automator_agent.cli.RAGEnhancedTestGenerator')
-    def test_automate_command_direct_generation(self, mock_rag_gen, mock_parser, mock_llm, mock_vector_store):
+    def test_automate_command_direct_generation(self, mock_rag_gen, mock_parser, mock_llm, mock_vector_store, mock_gate_class):
         """Test automate command with RAG-enhanced generation."""
+        mock_gate = Mock()
+        mock_gate.evaluate_cases = AsyncMock(return_value=Mock(status="PASS", hard_rule_errors=[], coverage_findings=[]))
+        mock_gate_class.return_value = mock_gate
+
         output_dir = self.temp_dir / "output"
         
         # Mock vector store

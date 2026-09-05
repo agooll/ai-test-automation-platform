@@ -19,6 +19,7 @@ from testteller.core.constants import (
     DEFAULT_LLAMA_EMBEDDING_MODEL,
     DEFAULT_OLLAMA_BASE_URL
 )
+from testteller.core.retrieval.models import LocalSearchResult, MatchType
 
 
 @pytest.fixture(scope="session")
@@ -210,6 +211,16 @@ def mock_chromadb_manager(test_collection_name: str) -> Mock:
     """Create a mock ChromaDB manager for testing."""
     mock_manager = Mock(spec=ChromaDBManager)
     mock_manager.collection_name = test_collection_name
+    mock_local_index = Mock()
+    mock_local_index.search.return_value = LocalSearchResult(
+        items=[],
+        match_type=MatchType.NONE,
+        unique=False,
+        exact_entity_requested=False
+    )
+    mock_local_index.clear.return_value = None
+    mock_local_index.add_documents.return_value = None
+    mock_manager.local_index = mock_local_index
     mock_manager.add_documents.return_value = None
     mock_manager.query_similar.return_value = {
         "documents": [["Sample test case 1", "Sample test case 2"]],

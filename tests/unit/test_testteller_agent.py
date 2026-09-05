@@ -264,12 +264,10 @@ class TestTestTellerAgent:
         """Test generating test cases."""
         code_context = "def login(username, password):\n    pass"
 
-        # Mock vector store query
-        mock_testteller_agent.vector_store.query_similar.return_value = {
-            "documents": [["Sample test case 1", "Sample test case 2"]],
-            "metadatas": [[{"source": "test1.py"}, {"source": "test2.py"}]],
-            "distances": [[0.1, 0.2]]
-        }
+        # Mock retriever
+        mock_testteller_agent.retriever.retrieve = AsyncMock(
+            return_value=Mock(documents=[Mock(content="Sample test case 1"), Mock(content="Sample test case 2")])
+        )
 
         # Mock LLM manager
         mock_testteller_agent.llm_manager.generate_text_async = AsyncMock(
@@ -278,9 +276,10 @@ class TestTestTellerAgent:
         result = await mock_testteller_agent.generate_test_cases(code_context, n_retrieved_docs=2)
 
         assert result == mock_llm_response
-        mock_testteller_agent.vector_store.query_similar.assert_called_once_with(
-            query_text=code_context,
-            n_results=2
+        mock_testteller_agent.retriever.retrieve.assert_called_once_with(
+            query=code_context,
+            collection_name=mock_testteller_agent.collection_name,
+            limit=2
         )
         mock_testteller_agent.llm_manager.generate_text_async.assert_called_once()
 
@@ -318,9 +317,10 @@ class TestTestTellerAgent:
         """Test error handling during test case generation."""
         code_context = "def login(username, password):\n    pass"
 
-        # Mock vector store to raise exception
-        mock_testteller_agent.vector_store.query_similar.side_effect = Exception(
-            "Query error")
+        # Mock retriever to raise exception
+        mock_testteller_agent.retriever.retrieve = AsyncMock(
+            side_effect=Exception("Query error")
+        )
 
         with pytest.raises(Exception, match="Query error"):
             await mock_testteller_agent.generate_test_cases(code_context)
