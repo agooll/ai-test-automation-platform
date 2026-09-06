@@ -55,8 +55,8 @@ class TestLLMManager:
     def test_get_supported_providers(self):
         """Test getting list of supported providers."""
         providers = LLMManager.get_supported_providers()
-        expected = ["gemini", "openai", "claude", "llama"]
-        assert providers == expected
+        expected = ["gemini", "openai", "claude", "llama", "zhipu"]
+        assert sorted(providers) == sorted(expected)
 
     @pytest.mark.unit
     def test_get_current_provider(self, mock_env_vars):

@@ -96,7 +96,7 @@ class LLMManager:
         provider: Optional[str] = None,
         generation_model: Optional[str] = None,
         embedding_model: Optional[str] = None,
-        allow_fallback: bool = True,
+        allow_fallback: bool = False,
     ):
         """
         Initialize the LLM Manager.
