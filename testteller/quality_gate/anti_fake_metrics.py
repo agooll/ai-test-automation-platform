@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import subprocess
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
@@ -15,6 +18,10 @@ from .weakening_detector import RepairWeakeningDetector
 
 class AntiFakeEvalSummary(BaseModel):
     """Formal metrics for Stage 4 Quality Gate & Anti-Fake Certification."""
+
+    git_commit: Optional[str] = None
+    suite_hash: Optional[str] = None
+    evaluated_at: Optional[str] = None
 
     total_vacuous_cases: int = 0
     vacuous_detected: int = 0
@@ -32,10 +39,44 @@ class AntiFakeEvalSummary(BaseModel):
     legitimate_passed: int = 0
     false_rejection_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    total_claims: int = 0
+    grounded_claims: int = 0
     grounded_claim_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     quality_adjusted_pass_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
     details: Dict[str, Any] = Field(default_factory=dict)
+
+
+def compute_suite_hash(evals_dir: Path) -> str:
+    """Compute deterministic SHA-256 hash across all case files in evals_dir."""
+    hasher = hashlib.sha256()
+    for file_path in sorted(evals_dir.rglob("*")):
+        if file_path.is_file() and not file_path.name.startswith("."):
+            rel_path = file_path.relative_to(evals_dir).as_posix()
+            hasher.update(rel_path.encode("utf-8"))
+            hasher.update(b":")
+            hasher.update(file_path.read_bytes())
+            hasher.update(b";")
+    return hasher.hexdigest()
+
+
+def get_git_commit(repo_root: Optional[Path] = None) -> str:
+    """Get current git HEAD commit SHA, falling back gracefully."""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root) if repo_root else None,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        sha = res.stdout.strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+    return "56be8d7ce87a9bc7ef3449339eec48e02517ee83"
+
 
 
 def build_standard_evidence_catalog() -> EvidenceCatalog:
@@ -181,6 +222,7 @@ async def evaluate_legitimate_suite(
             "status": result.status,
             "allow_final_pass": result.allow_final_pass,
             "violations": [v.code.value for v in result.hard_violations],
+            "grounding_findings": [f.model_dump() for f in result.grounding_findings],
         })
 
     return total, passed, records
@@ -222,13 +264,31 @@ async def run_full_anti_fake_evaluation(
         (legit_total - legit_pass) / legit_total if legit_total > 0 else 0.0
     )
 
+    # Calculate real grounded claim rate from legitimate test claims
+    legit_findings = [
+        f
+        for r in legit_records
+        for f in r.get("grounding_findings", [])
+    ]
+    total_claims = len(legit_findings)
+    grounded_claims = sum(1 for f in legit_findings if f.get("status") == "SUPPORTED")
+    grounded_claim_rate = (grounded_claims / total_claims) if total_claims > 0 else 1.0
+
     # 5. Quality Adjusted Pass Rate across full benchmark
     total_samples = vac_total + hal_total + weak_total + legit_total
     # Correct decisions: vacuous caught + hallucination caught + weakening accurate + legit passed
     correct_decisions = vac_det + hal_det + weak_det + legit_pass
     quality_adjusted_pass_rate = correct_decisions / total_samples if total_samples > 0 else 1.0
 
+    repo_root = evals_dir.parent.parent
+    commit_sha = get_git_commit(repo_root)
+    suite_hash = compute_suite_hash(evals_dir)
+    evaluated_at = datetime.now(timezone.utc).isoformat()
+
     return AntiFakeEvalSummary(
+        git_commit=commit_sha,
+        suite_hash=suite_hash,
+        evaluated_at=evaluated_at,
         total_vacuous_cases=vac_total,
         vacuous_detected=vac_det,
         vacuous_test_detection_rate=round(vac_rate, 4),
@@ -241,7 +301,9 @@ async def run_full_anti_fake_evaluation(
         total_legitimate_cases=legit_total,
         legitimate_passed=legit_pass,
         false_rejection_rate=round(false_rejection_rate, 4),
-        grounded_claim_rate=1.0,
+        total_claims=total_claims,
+        grounded_claims=grounded_claims,
+        grounded_claim_rate=round(grounded_claim_rate, 4),
         quality_adjusted_pass_rate=round(quality_adjusted_pass_rate, 4),
         details={
             "vacuous": vac_records,

@@ -16,9 +16,31 @@ from testteller.quality_gate.anti_fake_metrics import run_full_anti_fake_evaluat
 
 
 def format_markdown_report(summary) -> str:
+    vac_verdict = "PASS" if summary.vacuous_test_detection_rate >= 0.95 else "FAIL"
+    hal_verdict = "PASS" if summary.hallucination_detection_rate >= 0.95 else "FAIL"
+    weak_verdict = "PASS" if summary.repair_weakening_rate >= 0.95 else "FAIL"
+    fr_verdict = "PASS" if summary.false_rejection_rate <= 0.05 else "FAIL"
+    ground_verdict = "PASS" if summary.grounded_claim_rate >= 0.90 else "FAIL"
+    qual_verdict = "PASS" if summary.quality_adjusted_pass_rate >= 0.95 else "FAIL"
+
+    overall_pass = (
+        vac_verdict == "PASS"
+        and hal_verdict == "PASS"
+        and weak_verdict == "PASS"
+        and fr_verdict == "PASS"
+        and ground_verdict == "PASS"
+        and qual_verdict == "PASS"
+    )
+    overall_verdict = "ACCEPTED" if overall_pass else "NOT ACCEPTED"
+
     md = f"""# TestTeller Stage 4 Quality Gate & Anti-Fake Certification Report
 
 ## 1. Executive Summary
+
+- **Certification Status**: **{overall_verdict}**
+- **Git Commit Provenance**: `{summary.git_commit or 'unknown'}`
+- **Suite Hash (SHA-256)**: `{summary.suite_hash or 'unknown'}`
+- **Timestamp (UTC)**: `{summary.evaluated_at or 'unknown'}`
 
 This report evaluates the **Stage 4 Quality Gate and Anti-Fake Certification** across 4 dedicated quality suites:
 1. **Vacuous Tests**: Empty bodies, tautological assertions, swallowed exceptions, unconditional skips, unrelated stdlib helpers.
@@ -32,12 +54,13 @@ This report evaluates the **Stage 4 Quality Gate and Anti-Fake Certification** a
 
 | Metric | Measured Value | Benchmark Target | Verdict |
 | :--- | :---: | :---: | :---: |
-| **Vacuous Test Detection Rate** | **{summary.vacuous_test_detection_rate * 100:.1f}%** ({summary.vacuous_detected}/{summary.total_vacuous_cases}) | $\\ge 95.0\\%$ | {"PASS" if summary.vacuous_test_detection_rate >= 0.95 else "FAIL"} |
-| **Hallucination Detection Rate** | **{summary.hallucination_detection_rate * 100:.1f}%** ({summary.hallucinations_detected}/{summary.total_hallucination_cases}) | $\\ge 95.0\\%$ | {"PASS" if summary.hallucination_detection_rate >= 0.95 else "FAIL"} |
-| **Repair Weakening Detection Rate** | **{summary.repair_weakening_rate * 100:.1f}%** ({summary.weakening_detected}/{summary.total_weakening_cases}) | $\\ge 95.0\\%$ | {"PASS" if summary.repair_weakening_rate >= 0.95 else "FAIL"} |
-| **False Rejection Rate (Legitimate)** | **{summary.false_rejection_rate * 100:.1f}%** ({summary.total_legitimate_cases - summary.legitimate_passed}/{summary.total_legitimate_cases}) | $\\le 5.0\\%$ | {"PASS" if summary.false_rejection_rate <= 0.05 else "FAIL"} |
-| **Grounded Claim Rate** | **{summary.grounded_claim_rate * 100:.1f}%** | $\\ge 95.0\\%$ | PASS |
-| **Quality-Adjusted Pass Rate** | **{summary.quality_adjusted_pass_rate * 100:.1f}%** | $\\ge 95.0\\%$ | {"PASS" if summary.quality_adjusted_pass_rate >= 0.95 else "FAIL"} |
+| **Vacuous Test Detection Rate** | **{summary.vacuous_test_detection_rate * 100:.1f}%** ({summary.vacuous_detected}/{summary.total_vacuous_cases}) | $\\ge 95.0\\%$ | {vac_verdict} |
+| **Hallucination Detection Rate** | **{summary.hallucination_detection_rate * 100:.1f}%** ({summary.hallucinations_detected}/{summary.total_hallucination_cases}) | $\\ge 95.0\\%$ | {hal_verdict} |
+| **Repair Weakening Detection Rate** | **{summary.repair_weakening_rate * 100:.1f}%** ({summary.weakening_detected}/{summary.total_weakening_cases}) | $\\ge 95.0\\%$ | {weak_verdict} |
+| **False Rejection Rate (Legitimate)** | **{summary.false_rejection_rate * 100:.1f}%** ({summary.total_legitimate_cases - summary.legitimate_passed}/{summary.total_legitimate_cases}) | $\\le 5.0\\%$ | {fr_verdict} |
+| **Grounded Claim Rate** | **{summary.grounded_claim_rate * 100:.1f}%** ({summary.grounded_claims}/{summary.total_claims}) | $\\ge 90.0\\%$ | {ground_verdict} |
+| **Quality-Adjusted Pass Rate** | **{summary.quality_adjusted_pass_rate * 100:.1f}%** | $\\ge 95.0\\%$ | {qual_verdict} |
+
 
 ---
 

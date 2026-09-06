@@ -298,3 +298,252 @@ def test_cache_value():
     assert any("REPAIR_WEAKENED_ASSERTION" in fb or "REPAIR_EQUALITY_WEAKENED" in fb for fb in cq_res["repair_feedback"])
 
 
+@pytest.mark.asyncio
+async def test_repair_weakening_cannot_be_laundered_across_multiple_rounds(tmp_path: Path):
+    """
+    Verify regression for '两轮洗白':
+    Round 0 (initial): test with 2 assertions (assert c['k'] == 42 and assert len(c) == 1).
+    Round 1 (repair): weakens by deleting assert len(c) == 1. Gate flags and execution fails.
+    Round 2 (repair): keeps the weakened assertions from Round 1 and adds a comment (attempting to launder).
+                      Execution passes.
+    Invariant: Because quality gate checks against the initial baseline, Round 2 MUST still be
+               flagged as REPAIR_WEAKENED_ASSERTION and final_verdict MUST NOT be PASS.
+    """
+    def initial_generator(state: AgentState):
+        return {
+            "tests/test_multi_round.py": """
+from cachetools import LRUCache
+
+def test_cache():
+    c = LRUCache(maxsize=10)
+    c['k'] = 42
+    assert c['k'] == 42
+    assert len(c) == 1
+"""
+        }
+
+    def laundering_repairer(state: AgentState):
+        current_round = state.get("repair_round", 0)
+        if current_round == 0:
+            # Round 1: delete assert len(c) == 1
+            return {
+                "tests/test_multi_round.py": """
+from cachetools import LRUCache
+
+def test_cache():
+    c = LRUCache(maxsize=10)
+    c['k'] = 42
+    assert c['k'] == 42
+"""
+            }
+        else:
+            # Round 2: attempt to launder by keeping round 1's code and adding a comment
+            return {
+                "tests/test_multi_round.py": """
+from cachetools import LRUCache
+
+def test_cache():
+    # Attempting to launder the previous deletion across rounds
+    c = LRUCache(maxsize=10)
+    c['k'] = 42
+    assert c['k'] == 42
+"""
+            }
+
+    round_attempts = 0
+
+    async def mock_run_tests(workspace, command, framework, task_id=None):
+        nonlocal round_attempts
+        round_attempts += 1
+        # Round 0 & 1 fail, Round 2 execution passes
+        if round_attempts < 3:
+            return {"passed": False, "exit_code": 1, "stdout": "", "stderr": "AssertionError"}
+        return {"passed": True, "exit_code": 0, "stdout": "1 passed", "stderr": ""}
+
+    tools = AgentToolRegistry()
+    tools.register("run_tests", mock_run_tests)
+
+    workflow = AgenticTestWorkflow(
+        generator=initial_generator,
+        repairer=laundering_repairer,
+        tool_registry=tools,
+    )
+
+    result = await workflow.run({
+        "requirement": "Verify LRU cache keys and count",
+        "workspace": str(tmp_path),
+        "target_entrypoint": "cachetools.LRUCache",
+        "max_repair_rounds": 2,
+    })
+
+    # Invariant: Round 2 must NOT launder the deletion from Round 0
+    assert result.get("weakening_detected") is True
+    cq_res = result["code_quality_result"]
+    assert cq_res["status"] == "REJECTED"
+    assert cq_res["allow_final_pass"] is False
+    assert result["final_verdict"] == "REJECTED"
+
+    violations = [v["code"] for v in cq_res["hard_violations"]]
+    assert "REPAIR_WEAKENED_ASSERTION" in violations
+
+
+@pytest.mark.asyncio
+async def test_workflow_rejects_when_semantic_reviewer_fails(tmp_path: Path):
+    """
+    Verify integration: When execution passes and AST code quality passes,
+    but the Semantic Reviewer returns status='fail', final_verdict MUST be REJECTED.
+    """
+    def clean_generator(state: AgentState):
+        return {
+            "tests/test_clean.py": """
+from cachetools import LRUCache
+
+def test_cache_op():
+    c = LRUCache(maxsize=5)
+    c['x'] = 100
+    assert c['x'] == 100
+"""
+        }
+
+    async def failing_reviewer(state: AgentState):
+        return {
+            "status": "fail",
+            "requirement_alignment": 0.2,
+            "assertion_strength": 0.3,
+            "hallucination_risk": 0.8,
+            "confidence": 0.9,
+            "reason": "Test does not fulfill the requirement contract.",
+        }
+
+    tools = AgentToolRegistry()
+    async def mock_run_tests(workspace, command, framework, task_id=None):
+        return {"passed": True, "exit_code": 0, "stdout": "1 passed", "stderr": ""}
+
+    tools.register("run_tests", mock_run_tests)
+
+    workflow = AgenticTestWorkflow(
+        generator=clean_generator,
+        reviewer=failing_reviewer,
+        tool_registry=tools,
+    )
+
+    result = await workflow.run({
+        "requirement": "Verify LRU cache eviction under load",
+        "workspace": str(tmp_path),
+        "target_entrypoint": "cachetools.LRUCache",
+    })
+
+    assert result["execution_result"]["passed"] is True
+    assert result["code_quality_result"]["status"] == "PASS"
+    assert result["review"]["status"] == "fail"
+    # Final verdict MUST be REJECTED
+    assert result["final_verdict"] == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_workflow_needs_review_when_semantic_reviewer_uncertain(tmp_path: Path):
+    """
+    Verify integration: When execution passes and AST code quality passes,
+    but the Semantic Reviewer returns status='uncertain', final_verdict MUST be NEEDS_REVIEW.
+    """
+    def clean_generator(state: AgentState):
+        return {
+            "tests/test_clean.py": """
+from cachetools import LRUCache
+
+def test_cache_op():
+    c = LRUCache(maxsize=5)
+    c['x'] = 100
+    assert c['x'] == 100
+"""
+        }
+
+    async def uncertain_reviewer(state: AgentState):
+        return {
+            "status": "uncertain",
+            "requirement_alignment": 0.5,
+            "assertion_strength": 0.5,
+            "hallucination_risk": 0.4,
+            "confidence": 0.4,
+            "reason": "Reviewer cannot determine if boundary requirements are fulfilled.",
+        }
+
+    tools = AgentToolRegistry()
+    async def mock_run_tests(workspace, command, framework, task_id=None):
+        return {"passed": True, "exit_code": 0, "stdout": "1 passed", "stderr": ""}
+
+    tools.register("run_tests", mock_run_tests)
+
+    workflow = AgenticTestWorkflow(
+        generator=clean_generator,
+        reviewer=uncertain_reviewer,
+        tool_registry=tools,
+    )
+
+    result = await workflow.run({
+        "requirement": "Verify LRU cache boundary behavior",
+        "workspace": str(tmp_path),
+        "target_entrypoint": "cachetools.LRUCache",
+    })
+
+    assert result["execution_result"]["passed"] is True
+    assert result["code_quality_result"]["status"] == "PASS"
+    assert result["review"]["status"] == "uncertain"
+    # Final verdict MUST be NEEDS_REVIEW
+    assert result["final_verdict"] == "NEEDS_REVIEW"
+
+
+@pytest.mark.asyncio
+async def test_workflow_passes_when_all_three_gates_pass(tmp_path: Path):
+    """
+    Verify integration: When execution passes, AST code quality passes,
+    and Semantic Reviewer returns status='pass', final_verdict MUST be PASS.
+    """
+    def clean_generator(state: AgentState):
+        return {
+            "tests/test_clean.py": """
+from cachetools import LRUCache
+
+def test_cache_op():
+    c = LRUCache(maxsize=5)
+    c['x'] = 100
+    assert c['x'] == 100
+"""
+        }
+
+    async def passing_reviewer(state: AgentState):
+        return {
+            "status": "pass",
+            "requirement_alignment": 1.0,
+            "assertion_strength": 0.95,
+            "hallucination_risk": 0.0,
+            "confidence": 0.95,
+            "reason": "High quality test that accurately verifies SUT behavior.",
+        }
+
+    tools = AgentToolRegistry()
+    async def mock_run_tests(workspace, command, framework, task_id=None):
+        return {"passed": True, "exit_code": 0, "stdout": "1 passed", "stderr": ""}
+
+    tools.register("run_tests", mock_run_tests)
+
+    workflow = AgenticTestWorkflow(
+        generator=clean_generator,
+        reviewer=passing_reviewer,
+        tool_registry=tools,
+    )
+
+    result = await workflow.run({
+        "requirement": "Verify LRU cache basic key storage",
+        "workspace": str(tmp_path),
+        "target_entrypoint": "cachetools.LRUCache",
+    })
+
+    assert result["execution_result"]["passed"] is True
+    assert result["code_quality_result"]["status"] == "PASS"
+    assert result["review"]["status"] == "pass"
+    # Final verdict MUST be PASS
+    assert result["final_verdict"] == "PASS"
+
+
+

@@ -206,7 +206,11 @@ class AgenticTestWorkflow:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
         files = await _maybe_call(self.generator, state)
         write_result = await self.tools.invoke("write_files", workspace=ws, files=files)
-        update: AgentState = {"generated_files": files, "generation_success": write_result.ok}
+        update: AgentState = {
+            "generated_files": files,
+            "initial_generated_files": dict(files),
+            "generation_success": write_result.ok,
+        }
         if not write_result.ok:
             update["error"] = write_result.error
         return self._record(state, "generate", update, {"write_files": write_result.as_dict()})
@@ -227,6 +231,7 @@ class AgenticTestWorkflow:
             evidence_catalog=catalog,
             repo_path=ws,
             previous_files=state.get("previous_generated_files"),
+            baseline_files=state.get("initial_generated_files"),
         )
 
         history_entry = {
@@ -339,9 +344,11 @@ class AgenticTestWorkflow:
             "exit_code": None,
             "duration_ms": None,
         }
+        initial_files = state.get("initial_generated_files") or before_files
         repair_history = [*state.get("repair_history", []), history_entry]
         update: AgentState = {
             "generated_files": repaired_files,
+            "initial_generated_files": initial_files,
             "previous_generated_files": before_files,
             "repair_round": round_num,
             "repair_history": repair_history,

@@ -48,6 +48,7 @@ class AutomationCodeQualityGate:
         evidence_catalog: Optional[EvidenceCatalog] = None,
         repo_path: Optional[str] = None,
         previous_files: Optional[Dict[str, str]] = None,
+        baseline_files: Optional[Dict[str, str]] = None,
     ) -> CodeQualityGateResult:
         """Run deterministic AST rules and grounding validation on generated test files."""
         hard_violations: List[CodeViolation] = []
@@ -221,27 +222,44 @@ class AutomationCodeQualityGate:
         else:
             grounding_score = 1.0
 
-        # 7. Check for repair weakening against previous_files if provided
+        # 7. Check for repair weakening against baseline_files and previous_files
         weakening_detected = False
         weakening_violations_list: List[dict] = []
-        if previous_files:
+
+        ref_candidates: List[Tuple[str, Dict[str, str]]] = []
+        if baseline_files:
+            ref_candidates.append(("baseline", baseline_files))
+        if previous_files and previous_files != baseline_files:
+            ref_candidates.append(("previous", previous_files))
+        if not ref_candidates and previous_files:
+            ref_candidates.append(("previous", previous_files))
+
+        for ref_type, ref_files in ref_candidates:
             for file_path, code in generated_files.items():
                 if not file_path.endswith(".py"):
                     continue
-                if file_path in previous_files:
-                    b_code = previous_files[file_path]
+                if file_path in ref_files:
+                    b_code = ref_files[file_path]
                     w_res = RepairWeakeningDetector.detect(b_code, code, file_path=file_path)
                     if w_res.is_weakened:
                         weakening_detected = True
                         for wv in w_res.violations:
-                            hard_violations.append(wv.to_code_violation())
-                            weakening_violations_list.append({
-                                "code": wv.code.value,
-                                "test_name": wv.test_name,
-                                "file_path": wv.file_path,
-                                "line_number": wv.line_number,
-                                "message": wv.message,
-                            })
+                            cv = wv.to_code_violation()
+                            if ref_type == "baseline" and "baseline" not in cv.message:
+                                cv.message = f"{cv.message} (weakened compared to initial quality baseline)"
+                            # Avoid duplicate violation entries
+                            existing_violations = {(v.code, v.file_path, v.line_number) for v in hard_violations}
+                            if (cv.code, cv.file_path, cv.line_number) not in existing_violations:
+                                hard_violations.append(cv)
+                                weakening_violations_list.append({
+                                    "code": wv.code.value,
+                                    "test_name": wv.test_name,
+                                    "file_path": wv.file_path,
+                                    "line_number": wv.line_number,
+                                    "message": cv.message,
+                                    "reference": ref_type,
+                                })
+
 
         # Calculate vacuity score: 1.0 if clean, 0.0 if saturated with AST violations
         ast_error_count = sum(
