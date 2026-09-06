@@ -31,9 +31,9 @@ from ..quality_gate.code_models import CodeQualityGateResult
 from ..quality_gate.claim_binding import ClaimEvidenceBinding
 from ..core.evidence.catalog import EvidenceCatalog2
 from ..core.evidence.catalog_builder import EvidenceCatalogBuilder
-from ..core.evidence.models import EvidenceRecord
+from ..core.evidence.models import EvidenceRecord, SourceChunk, SourceManifest
 from ..core.evidence.repository import EvidenceRepository
-from ..automator_agent.repair_planner import RepairGroundingPlanner, RepairPlan
+from ..automator_agent.repair_planner import RepairChange, RepairGroundingPlanner, RepairPlan
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +279,8 @@ class AgenticTestWorkflow:
             "initial_generated_files": dict(files),
             "generation_success": write_result.ok,
         }
+        if "used_evidence_ids" in state:
+            update["used_evidence_ids"] = list(state["used_evidence_ids"])
         if not write_result.ok:
             update["error"] = write_result.error
         return self._record(state, "generate", update, {"write_files": write_result.as_dict()})
@@ -377,41 +379,73 @@ class AgenticTestWorkflow:
     async def _repair_node(self, state: AgentState) -> AgentState:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
         before_files = dict(state.get("generated_files", {}))
-        repaired_files = await _maybe_call(self.repairer, state)
 
-        # Build catalog for repair plan validation
+        # 1. Build canonical EvidenceCatalog2 for repair plan validation
         catalog_records = []
         for r in state.get("evidence_catalog", []):
             if isinstance(r, EvidenceRecord):
                 catalog_records.append(r)
             elif isinstance(r, dict):
                 try:
-                    catalog_records.append(EvidenceRecord(**r))
+                    d = dict(r)
+                    d.setdefault("extractor", "extracted")
+                    catalog_records.append(EvidenceRecord(**d))
                 except Exception:
                     pass
         catalog = EvidenceCatalog2(catalog_records)
 
-        # Stage 5.6 Invariant: Validate repair plan if expectation changes are specified
-        state_repair_plan = state.get("repair_plan", {})
-        plan_obj = RepairPlan(
-            root_cause=state_repair_plan.get("root_cause", "execution_failure"),
-            expectation_changes=state_repair_plan.get("expectation_changes", []),
-            required_evidence_ids=state_repair_plan.get("required_evidence_ids", []),
-        )
+        # 2. Formulate structured RepairPlan BEFORE repair
+        failure = state.get("failure_analysis", {})
+        state_repair_plan = state.get("repair_plan")
+
+        if isinstance(state_repair_plan, RepairPlan):
+            plan_obj = state_repair_plan
+        elif isinstance(state_repair_plan, dict) and state_repair_plan:
+            plan_obj = RepairPlan(
+                root_cause=state_repair_plan.get("root_cause", failure.get("root_cause", "execution_failure")),
+                proposed_changes=state_repair_plan.get("proposed_changes", []),
+                expectation_changes=state_repair_plan.get("expectation_changes", []),
+                required_evidence_ids=state_repair_plan.get("required_evidence_ids", state.get("used_evidence_ids", [])),
+            )
+        else:
+            expectation_changes = []
+            if state.get("weakening_detected"):
+                expectation_changes.append("revert_weakened_assertions")
+            root_cause = failure.get("root_cause", "execution_failure")
+            plan_obj = RepairPlan(
+                root_cause=root_cause,
+                proposed_changes=[
+                    RepairChange(
+                        change_type="alter_expectation" if expectation_changes else "fix_sut_call",
+                        target="test_logic",
+                        description=f"Repair failure caused by {root_cause}",
+                        evidence_id=catalog_records[0].evidence_id if catalog_records else None,
+                    )
+                ],
+                expectation_changes=expectation_changes,
+                required_evidence_ids=state.get("used_evidence_ids", [r.evidence_id for r in catalog_records[:3]]),
+            )
+
+        # 3. Strictly validate RepairPlan with RepairGroundingPlanner BEFORE invoking repair
         validated_plan = RepairGroundingPlanner.validate_repair_plan(plan_obj, catalog)
         if not validated_plan.allow_repair:
             round_num = state.get("repair_round", 0) + 1
             update: AgentState = {
                 "repair_round": round_num,
                 "repair_rejected": True,
+                "repair_plan": validated_plan.model_dump(),
                 "error": validated_plan.rejection_reason,
             }
+            logger.warning("Repair plan rejected before invocation: %s", validated_plan.rejection_reason)
             return self._record(state, "repair", update)
+
+        # 4. Invoke repairer with validated structured plan
+        state_with_plan = {**state, "repair_plan": validated_plan.model_dump()}
+        repaired_files = await _maybe_call(self.repairer, state_with_plan)
 
         write_result = await self.tools.invoke("write_files", workspace=ws, files=repaired_files)
         round_num = state.get("repair_round", 0) + 1
 
-        failure = state.get("failure_analysis", {})
         files_diff = {}
         all_names = set(before_files.keys()) | set(repaired_files.keys())
         for name in sorted(all_names):
@@ -450,6 +484,7 @@ class AgenticTestWorkflow:
             "previous_generated_files": before_files,
             "repair_round": round_num,
             "repair_history": repair_history,
+            "repair_plan": validated_plan.model_dump(),
         }
         if not write_result.ok:
             update["error"] = write_result.error
@@ -486,9 +521,26 @@ class AgenticTestWorkflow:
         ]
         has_core_unknowns = len(core_unknowns) > 0
 
-        coverage_score = state.get("grounding_coverage_score", state.get("evidence_bundle", {}).get("coverage_score", 1.0))
-        provenance_complete = state.get("provenance_completeness", state.get("evidence_bundle", {}).get("provenance_complete", True))
-        grounded_claim_rate = state.get("grounded_claim_rate", 1.0)
+        cov_val = state.get("grounding_coverage_score")
+        if cov_val is None:
+            bundle_dict = state.get("evidence_bundle")
+            if isinstance(bundle_dict, dict):
+                cov_val = bundle_dict.get("coverage_score", 0.0)
+            else:
+                cov_val = 0.0
+        coverage_score = float(cov_val)
+
+        prov_val = state.get("provenance_completeness")
+        if prov_val is None:
+            bundle_dict = state.get("evidence_bundle")
+            if isinstance(bundle_dict, dict):
+                prov_val = bundle_dict.get("provenance_complete", False)
+            else:
+                prov_val = False
+        provenance_complete = bool(prov_val)
+
+        g_rate = state.get("grounded_claim_rate")
+        grounded_claim_rate = float(g_rate) if g_rate is not None else 0.0
         weakening_detected = state.get("weakening_detected", False)
         repair_rejected = state.get("repair_rejected", False)
 
@@ -551,14 +603,44 @@ class AgenticTestWorkflow:
             try:
                 repo = EvidenceRepository(db_path)
                 for ev in state.get("evidence_catalog", []):
+                    record: Optional[EvidenceRecord] = None
                     if isinstance(ev, EvidenceRecord):
-                        repo.save_evidence_record(ev)
-                    elif isinstance(ev, dict) and "evidence_id" in ev and "source_id" in ev:
+                        record = ev
+                    elif isinstance(ev, dict) and "evidence_id" in ev:
                         try:
-                            repo.save_evidence_record(EvidenceRecord(**ev))
+                            d = dict(ev)
+                            d.setdefault("extractor", "extracted")
+                            record = EvidenceRecord(**d)
                         except Exception:
                             pass
 
+                    if record:
+                        # 1. Persist SourceManifest (source)
+                        manifest = SourceManifest(
+                            source_id=record.source_id,
+                            repository=record.repo_url,
+                            commit_sha=record.commit_sha,
+                            path=record.source_path,
+                            file_type=Path(record.source_path).suffix.lstrip(".") if record.source_path else "code",
+                            content_hash=record.content_hash,
+                        )
+                        repo.save_manifest(manifest)
+
+                        # 2. Persist SourceChunk (chunk)
+                        chunk = SourceChunk(
+                            chunk_id=record.source_chunk_id,
+                            source_id=record.source_id,
+                            text=record.value,
+                            line_start=record.line_start or 1,
+                            line_end=record.line_end or (record.line_start or 1),
+                            content_hash=record.content_hash,
+                        )
+                        repo.save_chunk(chunk)
+
+                        # 3. Persist EvidenceRecord (evidence)
+                        repo.save_evidence_record(record)
+
+                # 4. Persist ClaimEvidenceBinding (claim & claim_evidence_links)
                 for cb in state.get("claim_bindings", []):
                     if isinstance(cb, ClaimEvidenceBinding):
                         repo.save_claim_binding(cb)

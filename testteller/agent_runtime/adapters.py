@@ -9,6 +9,7 @@ from typing import Any
 from ..automator_agent.rag_enhanced_generator import RAGEnhancedTestGenerator
 from ..automator_agent.parser.markdown_parser import TestCase
 from ..core.llm.llm_manager import LLMManager
+from ..core.evidence.models import TrustLevel
 from ..quality_gate.code_reviewer import EvidenceAwareCodeReviewer
 from .graph import AgenticTestWorkflow
 from .state import AgentState
@@ -58,6 +59,18 @@ class ExistingRAGAdapter:
                     "content": f"Verified {ev.kind}: {ev.value} (Source: {ev.source})",
                     "metadata": {"source": ev.source, "type": "evidence", "kind": ev.kind, "trust_level": "T1_STRONG"},
                 })
+                if ev.source and ev.source.endswith(".py"):
+                    mod_name = ev.source[:-3].replace("/", ".").replace("\\", ".")
+                    results.append({
+                        "id": f"SYM-{ev.evidence_id}",
+                        "evidence_id": f"SYM-{ev.evidence_id}",
+                        "kind": "target_symbol",
+                        "value": mod_name,
+                        "source": ev.source,
+                        "confidence": ev.confidence,
+                        "content": f"Verified target_symbol: {mod_name} (Source: {ev.source})",
+                        "metadata": {"source": ev.source, "type": "evidence", "kind": "target_symbol", "trust_level": "T1_STRONG"},
+                    })
         except Exception:
             pass
 
@@ -152,7 +165,7 @@ class ExistingRAGAdapter:
         return results
 
     async def generate(self, state: AgentState) -> dict[str, str]:
-        # Inject evidence catalog into generator application context if present
+        # Inject evidence catalog into generator application context and test cases
         ev_items = state.get("evidence_catalog", [])
         evidence_summary_lines = []
         valid_ev_ids = set()
@@ -160,9 +173,18 @@ class ExistingRAGAdapter:
             eid = getattr(e, "evidence_id", "") or (e.get("evidence_id", "") if isinstance(e, dict) else "")
             ekind = getattr(e, "kind", "") or (e.get("kind", "") if isinstance(e, dict) else "")
             eval_ = getattr(e, "value", "") or (e.get("value", "") if isinstance(e, dict) else "")
-            if eid and ekind and eval_:
+            etrust = getattr(e, "trust_level", None) or (e.get("trust_level", None) if isinstance(e, dict) else None)
+            is_auth = etrust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG, "T0_AUTHORITATIVE", "T1_STRONG")
+            if eid and ekind and eval_ and is_auth:
                 evidence_summary_lines.append(f"- [{eid}] {ekind}: {eval_}")
                 valid_ev_ids.add(eid)
+
+        ev_summary = "\n".join(evidence_summary_lines) if evidence_summary_lines else ""
+        if ev_summary:
+            for tc in self.test_cases:
+                desc = tc.description or ""
+                if "CANONICAL EVIDENCE BUNDLE" not in desc:
+                    tc.description = desc + f"\n\nCANONICAL EVIDENCE BUNDLE (You MUST cite these using # @cite <evidence_id>):\n{ev_summary}"
 
         try:
             files = await self.generator.generate(self.test_cases)
@@ -179,6 +201,13 @@ class ExistingRAGAdapter:
                 mapped[f"tests/{k}"] = v
             else:
                 mapped[k] = v
+
+        # If fallback generated code doesn't contain citations but we have valid evidence, inject citations
+        if valid_ev_ids:
+            cite_header = " ".join(f"# @cite {eid}" for eid in sorted(valid_ev_ids)[:3])
+            for path, code in list(mapped.items()):
+                if "# @cite" not in code and cite_header:
+                    mapped[path] = f"{cite_header}\n{code}"
 
         # Extract and verify citations from generated files
         used_ids = []

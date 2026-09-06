@@ -63,20 +63,34 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
     target_repo = state.get("target_repo") or state.get("repo_path") or state.get("workspace", "")
     target_ep = state.get("target_entrypoint")
     pinned_commit = state.get("pinned_commit")
-    if not pinned_commit and target_repo and Path(target_repo).exists():
-        try:
-            import subprocess
-            res = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=target_repo,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                pinned_commit = res.stdout.strip()
-        except Exception:
-            pinned_commit = None
+    if not pinned_commit:
+        if target_repo and Path(target_repo).exists():
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=target_repo,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    pinned_commit = res.stdout.strip()
+            except Exception:
+                pinned_commit = None
+        if not pinned_commit:
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    pinned_commit = res.stdout.strip()
+            except Exception:
+                pinned_commit = None
 
     extracted: List[EvidenceRecord] = []
     for ev in state.get("evidence_catalog", []):

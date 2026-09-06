@@ -175,16 +175,43 @@ def test_evidence_catalog_builder_assembly():
         source_id="SRC-1",
         source_path="auth.py",
         source_chunk_id="CHK-1",
+        line_start=10,
+        line_end=20,
         commit_sha="0842b24",
         content_hash="h_auth",
         extractor="ast_extractor",
         trust_level=TrustLevel.T0_AUTHORITATIVE,
     )
 
+    query_plan = {
+        "plan_id": "test_plan_01",
+        "queries": [
+            {
+                "query_id": "Q1",
+                "kind": "target_symbol",
+                "text": "AuthService.login",
+                "required": True,
+                "exact_terms": ["AuthService.login"],
+            },
+            {
+                "query_id": "Q2",
+                "kind": "api_endpoint",
+                "text": "POST /api/v1/auth/login",
+                "required": True,
+                "exact_terms": ["POST /api/v1/auth/login"],
+            },
+        ],
+    }
+
     bundle = builder.build_bundle(
         extracted_records=[ev_item],
+        query_plan=query_plan,
     )
 
     assert bundle.provenance_complete is True
     assert len(bundle.evidence) == 1
     assert len(bundle.conflicts) == 0
+    # Q1 matched, Q2 missing -> 1 / 2 = 0.5 coverage score (not fake 1.0)
+    assert bundle.coverage_score == 0.5
+    assert len(bundle.missing_required_evidence) == 1
+

@@ -103,9 +103,12 @@ class ClaimEvidenceBinder:
                 except Exception:
                     pass
 
-            is_t4 = (match_trust == TrustLevel.T4_UNVERIFIED)
+            is_authoritative = (
+                match_trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG)
+                or getattr(match_trust, "is_authoritative", False)
+            )
 
-            if match and not is_t4:
+            if match and is_authoritative:
                 ev_id = getattr(match, "evidence_id", "EV-UNKNOWN")
                 src_path = getattr(match, "source_path", getattr(match, "source", "unknown"))
                 chunk_id = getattr(match, "source_chunk_id", "CHK-UNKNOWN")
@@ -143,18 +146,25 @@ class ClaimEvidenceBinder:
                         source_file=claim.file_path,
                     )
                 )
-            elif match and is_t4:
-                # Invariant: T4_UNVERIFIED cannot support a factual claim
+            elif match and not is_authoritative:
+                # Invariant: Only T0/T1 can independently support factual claims. T2/T3/T4 cannot.
                 claim.status = "UNSUPPORTED"
                 v_code, _, sugg = cls._build_violation(claim, catalog)
-                msg = f"Claim '{claim.value}' matches only T4_UNVERIFIED inference, which cannot support a factual claim."
+                trust_str = match_trust.value if hasattr(match_trust, "value") else str(match_trust or "UNVERIFIED")
+                if match_trust == TrustLevel.T4_UNVERIFIED:
+                    msg = f"Claim '{claim.value}' matches only T4_UNVERIFIED inference, which cannot support a factual claim."
+                    suggestion = "Verify claim against authoritative source code (T0) or specifications (T1)."
+                else:
+                    msg = f"Claim '{claim.value}' matches only {trust_str} evidence, which cannot independently support a factual claim. Only T0_AUTHORITATIVE or T1_STRONG evidence can support factual claims."
+                    suggestion = "Verify claim against authoritative source code AST (T0) or specifications (T1)."
+
                 v = CodeViolation(
                     code=v_code,
                     file_path=claim.file_path,
                     line_number=claim.line_number,
                     message=msg,
                     severity="error",
-                    suggestion="Verify claim against authoritative source code (T0) or specifications (T1).",
+                    suggestion=suggestion,
                 )
                 violations.append(v)
                 binding = ClaimEvidenceBinding(
@@ -255,7 +265,7 @@ class ClaimEvidenceBinder:
         if claimed_citations:
             valid_citations = 0
             for cid in claimed_citations:
-                # Must exist in catalog, have >= T3 trust (not T4), and match at least one claim
+                # Must exist in catalog, have authoritative trust (T0 or T1), and match at least one claim
                 in_catalog = False
                 ev_obj = None
                 if hasattr(catalog, "get_by_id"):
@@ -268,7 +278,17 @@ class ClaimEvidenceBinder:
                         in_catalog = True
 
                 ev_trust = getattr(ev_obj, "trust_level", None) if ev_obj else None
-                if ev_trust == TrustLevel.T4_UNVERIFIED or ev_trust == "T4_UNVERIFIED":
+                if isinstance(ev_trust, str):
+                    try:
+                        ev_trust = TrustLevel(ev_trust)
+                    except Exception:
+                        pass
+
+                is_auth = (
+                    ev_trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG)
+                    or getattr(ev_trust, "is_authoritative", False)
+                )
+                if not is_auth:
                     in_catalog = False
 
                 if in_catalog and cid in used_evidence_set:

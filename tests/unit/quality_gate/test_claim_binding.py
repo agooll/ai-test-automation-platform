@@ -237,3 +237,56 @@ def test_claim_binding_t4_citation_rejected():
     assert res.grounded_claim_rate == 1.0
     assert res.citation_accuracy == 0.0
 
+
+@pytest.mark.unit
+def test_claim_binding_t2_t3_cannot_support_factual_claim():
+    """T2_SUPPORTING and T3_WEAK evidence cannot independently support factual claims."""
+    catalog = EvidenceCatalog2()
+    t2_ev = EvidenceRecord(
+        evidence_id="EV-T2-DOC",
+        kind="api_endpoint",
+        value="POST /api/v1/checkout",
+        source_id="s_doc",
+        source_path="README.md",
+        source_chunk_id="c_doc",
+        extractor="doc_extractor",
+        trust_level=TrustLevel.T2_SUPPORTING,
+    )
+    t3_ev = EvidenceRecord(
+        evidence_id="EV-T3-HIST",
+        kind="target_symbol",
+        value="CheckoutService.process",
+        source_id="s_hist",
+        source_path="historical_tests.py",
+        source_chunk_id="c_hist",
+        extractor="pattern_miner",
+        trust_level=TrustLevel.T3_WEAK,
+    )
+    catalog.add_record(t2_ev)
+    catalog.add_record(t3_ev)
+
+    claims = [
+        ClaimItem(
+            claim_id="C-T2",
+            kind="api_endpoint",
+            value="POST /api/v1/checkout",
+            file_path="tests/test_checkout.py",
+            line_number=12,
+        ),
+        ClaimItem(
+            claim_id="C-T3",
+            kind="target_symbol",
+            value="CheckoutService.process",
+            file_path="tests/test_checkout.py",
+            line_number=18,
+        ),
+    ]
+
+    res = ClaimEvidenceBinder.bind(claims=claims, catalog=catalog)
+    assert res.grounded_claim_rate == 0.0
+    assert len(res.unsupported_claims) == 2
+    assert res.has_blocking_violations is True
+    assert any("T2_SUPPORTING" in v.message for v in res.violations)
+    assert any("T3_WEAK" in v.message for v in res.violations)
+
+

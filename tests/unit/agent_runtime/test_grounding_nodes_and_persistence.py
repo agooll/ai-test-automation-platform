@@ -320,4 +320,7 @@ def test_persist_node_relational_evidence_persistence():
         trail = repo.get_provenance_trail("EV-PERSIST-1")
         assert trail is not None
         assert trail["evidence_id"] == "EV-PERSIST-1"
+        assert trail["source_path"] == "health.py"
+        assert trail["chunk_id"] == "c1"
+
 
