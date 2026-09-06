@@ -25,6 +25,12 @@ class CodeViolationCode(str, Enum):
     HALLUCINATED_SYMBOL = "HALLUCINATED_SYMBOL"
     UNSUPPORTED_API_ENDPOINT = "UNSUPPORTED_API_ENDPOINT"
     UNSUPPORTED_UI_SELECTOR = "UNSUPPORTED_UI_SELECTOR"
+    REPAIR_WEAKENED_ASSERTION = "REPAIR_WEAKENED_ASSERTION"
+    REPAIR_EQUALITY_WEAKENED = "REPAIR_EQUALITY_WEAKENED"
+    REPAIR_EXCEPTION_BROADENED = "REPAIR_EXCEPTION_BROADENED"
+    REPAIR_TARGET_MOCKED = "REPAIR_TARGET_MOCKED"
+    REPAIR_SKIP_OR_XFAIL_ADDED = "REPAIR_SKIP_OR_XFAIL_ADDED"
+    REPAIR_EXPECTED_VALUE_LOOSENED = "REPAIR_EXPECTED_VALUE_LOOSENED"
 
 
 class CodeViolation(BaseModel):
@@ -115,6 +121,8 @@ class CodeQualityGateResult(BaseModel):
     allow_execution: bool = True
     allow_final_pass: bool = False
     repair_feedback: List[str] = Field(default_factory=list)
+    weakening_detected: bool = False
+    weakening_violations: List[dict] = Field(default_factory=list)
 
     def as_dict(self) -> dict:
         return self.model_dump(mode="json")

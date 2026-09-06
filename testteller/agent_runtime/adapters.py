@@ -9,6 +9,7 @@ from typing import Any
 from ..automator_agent.rag_enhanced_generator import RAGEnhancedTestGenerator
 from ..automator_agent.parser.markdown_parser import TestCase
 from ..core.llm.llm_manager import LLMManager
+from ..quality_gate.code_reviewer import EvidenceAwareCodeReviewer
 from .graph import AgenticTestWorkflow
 from .state import AgentState
 
@@ -27,6 +28,7 @@ class ExistingRAGAdapter:
         self.test_cases = test_cases
         self.llm_manager = llm_manager
         self.allow_weak_fallback = allow_weak_fallback
+        self.code_reviewer = EvidenceAwareCodeReviewer(generator=self.llm_manager)
 
     def planner(self, state: AgentState) -> dict[str, Any]:
         return {
@@ -140,16 +142,8 @@ Return only the complete corrected file. Do not add TODOs or invent endpoints.
             files[name] = self._clean_code(fixed)
         return files
 
-    @staticmethod
-    def reviewer(state: AgentState) -> dict[str, Any]:
-        execution = state.get("execution_result", {})
-        return {
-            "status": "pass" if execution.get("passed") else "uncertain",
-            "evidence": {
-                "exit_code": execution.get("exit_code"),
-                "repair_round": state.get("repair_round", 0),
-            },
-        }
+    async def reviewer(self, state: AgentState) -> dict[str, Any]:
+        return await self.code_reviewer.review(state)
 
     @staticmethod
     def _clean_code(value: str) -> str:

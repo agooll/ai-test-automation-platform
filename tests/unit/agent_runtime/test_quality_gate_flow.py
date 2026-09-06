@@ -232,3 +232,69 @@ def test_list_users():
     assert cq_res["allow_final_pass"] is True
     assert result["final_verdict"] == "PASS"
 
+
+@pytest.mark.asyncio
+async def test_workflow_blocks_repair_weakening(tmp_path: Path):
+    """
+    Verify Stage 4.4: When repair attempts to pass by weakening assertions,
+    the workflow detects weakening, rejects execution, and prevents final PASS.
+    """
+    def initial_generator(state: AgentState):
+        return {
+            "tests/test_weakening.py": """
+from cachetools import LRUCache
+
+def test_cache_value():
+    c = LRUCache(maxsize=10)
+    c['k'] = 42
+    assert c['k'] == 42
+    assert len(c) == 1
+"""
+        }
+
+    def weakening_repairer(state: AgentState):
+        # Repaired version deleted an assertion and softened the other to is not None
+        return {
+            "tests/test_weakening.py": """
+from cachetools import LRUCache
+
+def test_cache_value():
+    c = LRUCache(maxsize=10)
+    c['k'] = 42
+    assert c['k'] is not None
+"""
+        }
+
+    exec_call_count = 0
+
+    async def mock_run_tests(workspace, command, framework, task_id=None):
+        nonlocal exec_call_count
+        exec_call_count += 1
+        # Fail on initial generation round
+        return {"passed": False, "exit_code": 1, "stdout": "", "stderr": "AssertionError"}
+
+    tools = AgentToolRegistry()
+    tools.register("run_tests", mock_run_tests)
+
+    workflow = AgenticTestWorkflow(
+        generator=initial_generator,
+        repairer=weakening_repairer,
+        tool_registry=tools,
+    )
+
+    result = await workflow.run({
+        "requirement": "Verify LRU cache keys and count",
+        "workspace": str(tmp_path),
+        "target_entrypoint": "cachetools.LRUCache",
+        "max_repair_rounds": 1,
+    })
+
+    # Weakening must be flagged
+    assert result.get("weakening_detected") is True
+    cq_res = result["code_quality_result"]
+    assert cq_res["status"] == "REJECTED"
+    assert cq_res["allow_final_pass"] is False
+    assert result["final_verdict"] == "REJECTED"
+    assert any("REPAIR_WEAKENED_ASSERTION" in fb or "REPAIR_EQUALITY_WEAKENED" in fb for fb in cq_res["repair_feedback"])
+
+

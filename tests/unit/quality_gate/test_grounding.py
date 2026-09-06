@@ -4,6 +4,8 @@ import ast
 from pathlib import Path
 import pytest
 
+pytestmark = [pytest.mark.unit]
+
 from testteller.quality_gate.code_models import (
     ClaimItem,
     CodeViolationCode,

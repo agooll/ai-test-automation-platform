@@ -304,10 +304,24 @@ class CodeClaimExtractor(ast.NodeVisitor):
         self.target_pkg: Optional[str] = target_entrypoint.split(".")[0] if target_entrypoint else None
         self.claims: List[ClaimItem] = []
         self._claim_counter = 0
+        self.sut_var_types: Dict[str, str] = {}
 
     def _next_id(self, kind: str) -> str:
         self._claim_counter += 1
         return f"C-{kind.upper()}-{self._claim_counter:03d}"
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if isinstance(node.value, ast.Call):
+            func_name = ""
+            if isinstance(node.value.func, ast.Name):
+                func_name = node.value.func.id
+            elif isinstance(node.value.func, ast.Attribute):
+                func_name = node.value.func.attr
+            if func_name and (func_name == self.target_entrypoint or (self.target_entrypoint and func_name in self.target_entrypoint)):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        self.sut_var_types[t.id] = func_name
+        self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
         """Track module imports matching target package."""
@@ -362,6 +376,24 @@ class CodeClaimExtractor(ast.NodeVisitor):
 
         # 2. Check for UI locator calls (page.locator, page.click, etc.)
         self._check_ui_call(node)
+
+        # 3. Check for method calls on SUT instances
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            recv_var = node.func.value.id
+            method_name = node.func.attr
+            if recv_var in self.sut_var_types:
+                cls_name = self.sut_var_types[recv_var]
+                if not method_name.startswith("__"):
+                    self.claims.append(
+                        ClaimItem(
+                            claim_id=self._next_id("target_symbol"),
+                            kind="target_symbol",
+                            value=f"{cls_name}.{method_name}",
+                            file_path=self.file_path,
+                            line_number=node.lineno,
+                            status="UNKNOWN",
+                        )
+                    )
 
         self.generic_visit(node)
 
@@ -596,11 +628,12 @@ class EvidenceCatalog:
             if len(ev_parts) == 2:
                 e_method, e_path = ev_parts[0].upper(), CodeClaimExtractor._normalize_endpoint_path(ev_parts[1])
                 if c_method == e_method:
-                    if c_path == e_path:
+                    if c_path == e_path or self._path_matches_template(template=e_path, concrete=c_path):
                         return ev
-                    # Parameterized path match: /api/users/{id} matches /api/users/123
-                    if self._path_matches_template(template=e_path, concrete=c_path):
-                        return ev
+            elif len(ev_parts) == 1:
+                e_path = CodeClaimExtractor._normalize_endpoint_path(ev_parts[0])
+                if c_path == e_path or self._path_matches_template(template=e_path, concrete=c_path):
+                    return ev
         return None
 
     def _match_target_symbol(self, claim_val: str) -> Optional[EvidenceItem]:

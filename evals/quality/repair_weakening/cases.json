@@ -1,0 +1,58 @@
+[
+  {
+    "id": "weakening_01_deleted_assertion",
+    "pattern": "DELETED_ASSERTION",
+    "expected_weakened": true,
+    "before": "def test_order_processing():\n    order = process_order(101)\n    assert order.status == 'COMPLETED'\n    assert order.total == 500\n    assert len(order.items) == 3\n",
+    "after": "def test_order_processing():\n    order = process_order(101)\n    assert order.status == 'COMPLETED'\n"
+  },
+  {
+    "id": "weakening_02_equality_to_not_none",
+    "pattern": "EQUALITY_TO_NOT_NONE",
+    "expected_weakened": true,
+    "before": "def test_user_lookup():\n    user = find_user(42)\n    assert user.role == 'administrator'\n",
+    "after": "def test_user_lookup():\n    user = find_user(42)\n    assert user.role is not None\n"
+  },
+  {
+    "id": "weakening_03_equality_to_truthiness",
+    "pattern": "EQUALITY_TO_TRUTHINESS",
+    "expected_weakened": true,
+    "before": "def test_service_status():\n    st = get_status()\n    assert st == 'HEALTHY'\n",
+    "after": "def test_service_status():\n    st = get_status()\n    assert st\n"
+  },
+  {
+    "id": "weakening_04_exception_broadened",
+    "pattern": "EXCEPTION_BROADENED",
+    "expected_weakened": true,
+    "before": "import pytest\ndef test_cache_miss():\n    with pytest.raises(KeyError):\n        c['missing']\n",
+    "after": "import pytest\ndef test_cache_miss():\n    with pytest.raises(Exception):\n        c['missing']\n"
+  },
+  {
+    "id": "weakening_05_target_mocked",
+    "pattern": "TARGET_MOCKED",
+    "expected_weakened": true,
+    "before": "def test_payment():\n    gw = PaymentGateway()\n    assert gw.charge(100) is True\n",
+    "after": "from unittest.mock import MagicMock\ndef test_payment():\n    gw = MagicMock()\n    gw.charge.return_value = True\n    assert gw.charge(100) is True\n"
+  },
+  {
+    "id": "weakening_06_skip_added",
+    "pattern": "SKIP_ADDED",
+    "expected_weakened": true,
+    "before": "def test_heavy_computation():\n    assert compute(10) == 100\n",
+    "after": "import pytest\n@pytest.mark.skip(reason='temporarily skipped')\ndef test_heavy_computation():\n    assert compute(10) == 100\n"
+  },
+  {
+    "id": "weakening_07_loosened_bound",
+    "pattern": "LOOSENED_BOUND",
+    "expected_weakened": true,
+    "before": "def test_batch_results():\n    res = run_batch()\n    assert len(res) == 10\n",
+    "after": "def test_batch_results():\n    res = run_batch()\n    assert len(res) >= 0\n"
+  },
+  {
+    "id": "weakening_08_legitimate_repair",
+    "pattern": "LEGITIMATE_REPAIR",
+    "expected_weakened": false,
+    "before": "from cachetools import LRUCache\ndef test_legit():\n    c = LRUCache(maxsize=2)\n    c['a'] = 1\n    assert c['a'] == 1\n    assert len(c) == 1\n",
+    "after": "from cachetools import LRUCache\ndef test_legit():\n    c = LRUCache(maxsize=3)\n    c['a'] = 1\n    assert c['a'] == 1\n    assert len(c) == 1\n"
+  }
+]

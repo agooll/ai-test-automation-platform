@@ -27,6 +27,7 @@ from .grounding import (
     RepoSymbolExtractor,
 )
 from .python_analyzer import analyze_test_module
+from .weakening_detector import RepairWeakeningDetector
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class AutomationCodeQualityGate:
         use_ai: bool = False,
         evidence_catalog: Optional[EvidenceCatalog] = None,
         repo_path: Optional[str] = None,
+        previous_files: Optional[Dict[str, str]] = None,
     ) -> CodeQualityGateResult:
         """Run deterministic AST rules and grounding validation on generated test files."""
         hard_violations: List[CodeViolation] = []
@@ -219,6 +221,28 @@ class AutomationCodeQualityGate:
         else:
             grounding_score = 1.0
 
+        # 7. Check for repair weakening against previous_files if provided
+        weakening_detected = False
+        weakening_violations_list: List[dict] = []
+        if previous_files:
+            for file_path, code in generated_files.items():
+                if not file_path.endswith(".py"):
+                    continue
+                if file_path in previous_files:
+                    b_code = previous_files[file_path]
+                    w_res = RepairWeakeningDetector.detect(b_code, code, file_path=file_path)
+                    if w_res.is_weakened:
+                        weakening_detected = True
+                        for wv in w_res.violations:
+                            hard_violations.append(wv.to_code_violation())
+                            weakening_violations_list.append({
+                                "code": wv.code.value,
+                                "test_name": wv.test_name,
+                                "file_path": wv.file_path,
+                                "line_number": wv.line_number,
+                                "message": wv.message,
+                            })
+
         # Calculate vacuity score: 1.0 if clean, 0.0 if saturated with AST violations
         ast_error_count = sum(
             1
@@ -297,4 +321,6 @@ class AutomationCodeQualityGate:
             allow_execution=allow_execution,
             allow_final_pass=allow_final_pass,
             repair_feedback=repair_feedback,
+            weakening_detected=weakening_detected,
+            weakening_violations=weakening_violations_list,
         )

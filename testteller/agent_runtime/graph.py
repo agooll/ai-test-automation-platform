@@ -226,6 +226,7 @@ class AgenticTestWorkflow:
             retrieved_context=context,
             evidence_catalog=catalog,
             repo_path=ws,
+            previous_files=state.get("previous_generated_files"),
         )
 
         history_entry = {
@@ -234,6 +235,7 @@ class AgenticTestWorkflow:
             "vacuity_score": gate_res.vacuity_score,
             "grounding_score": gate_res.grounding_score,
             "violations_count": len(gate_res.hard_violations),
+            "weakening_detected": gate_res.weakening_detected,
             "timestamp": time.time(),
         }
         cq_history = [*state.get("code_quality_history", []), history_entry]
@@ -243,6 +245,7 @@ class AgenticTestWorkflow:
             "code_quality_history": cq_history,
             "vacuity_score": gate_res.vacuity_score,
             "grounding_score": gate_res.grounding_score,
+            "weakening_detected": gate_res.weakening_detected,
         }
 
         # If quality gate rejected and we cannot execute, surface error or diagnostics
@@ -339,6 +342,7 @@ class AgenticTestWorkflow:
         repair_history = [*state.get("repair_history", []), history_entry]
         update: AgentState = {
             "generated_files": repaired_files,
+            "previous_generated_files": before_files,
             "repair_round": round_num,
             "repair_history": repair_history,
         }

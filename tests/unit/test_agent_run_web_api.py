@@ -39,7 +39,10 @@ async def test_agent_run_api_lifecycle(tmp_path: Path):
     sample_file.write_text("# Test\n## TC1\nSteps: 1\n", encoding="utf-8")
 
     async def fake_generator(state):
-        return {"test_run.py": "def test_f():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
+        return {
+            "app.py": "def compute(x):\n    return x * 2\n",
+            "tests/test_run.py": "from app import compute\n\ndef test_f():\n    res = compute(21)\n    assert res == 42\n",
+        }
 
     workflow = AgenticTestWorkflow(generator=fake_generator)
 
@@ -59,6 +62,7 @@ async def test_agent_run_api_lifecycle(tmp_path: Path):
             "workspace": str(tmp_path),
             "test_command": ["python", "-m", "pytest", "-q"],
             "human_review": False,
+            "target_entrypoint": "app.compute",
         },
     )
 
@@ -172,7 +176,10 @@ async def test_sse_event_ordering_and_review_decoupling(tmp_path: Path):
     sample_file.write_text("# Test\n## TC1\nSteps: 1\n", encoding="utf-8")
 
     async def fake_generator(state):
-        return {"test_run.py": "def test_f():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
+        return {
+            "app.py": "def compute(x):\n    return x * 2\n",
+            "tests/test_run.py": "from app import compute\n\ndef test_f():\n    res = compute(21)\n    assert res == 42\n",
+        }
 
     workflow = AgenticTestWorkflow(generator=fake_generator)
 
@@ -192,6 +199,7 @@ async def test_sse_event_ordering_and_review_decoupling(tmp_path: Path):
             "workspace": str(tmp_path),
             "test_command": ["python", "-m", "pytest", "-q"],
             "human_review": False,
+            "target_entrypoint": "app.compute",
         },
     )
 

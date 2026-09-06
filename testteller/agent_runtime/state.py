@@ -42,3 +42,5 @@ class AgentState(TypedDict, total=False):
     grounding_catalog: list[dict[str, Any]]
     unsupported_claims: list[dict[str, Any]]
     semantic_quality_result: dict[str, Any]
+    previous_generated_files: dict[str, str]
+    weakening_detected: bool
