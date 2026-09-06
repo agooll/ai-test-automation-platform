@@ -131,6 +131,7 @@ testteller_cli*
 
 # Benchmark runtime and cache
 evals/projects/cache/
+evals/workspace/
 evals/reports/*
 !evals/reports/.gitkeep
 !evals/reports/official_baseline/
