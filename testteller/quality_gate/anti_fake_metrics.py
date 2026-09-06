@@ -75,7 +75,7 @@ def get_git_commit(repo_root: Optional[Path] = None) -> str:
             return sha
     except Exception:
         pass
-    return "56be8d7ce87a9bc7ef3449339eec48e02517ee83"
+    return "unknown"
 
 
 
