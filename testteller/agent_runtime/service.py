@@ -41,6 +41,9 @@ class AgentRunConfig:
     execution_backend: str = "auto"
     sandbox_policy: Optional[Any] = None
     target_entrypoint: Optional[str] = None
+    repo_path: Optional[str] = None
+    target_repo: Optional[str] = None
+    pinned_commit: Optional[str] = None
 
 
 
@@ -144,6 +147,9 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         "repair_history": [],
         "execution_backend": config.execution_backend,
         "target_entrypoint": target_entrypoint,
+        "target_repo": config.target_repo,
+        "repo_path": config.repo_path,
+        "pinned_commit": config.pinned_commit,
     }
 
 

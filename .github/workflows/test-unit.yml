@@ -40,6 +40,14 @@ jobs:
     - name: Run unit tests
       run: |
         pytest tests/unit/ -v --cov=testteller --cov-report=xml --cov-report=term-missing -m "unit or automation"
+
+    - name: Run Stage 4 Quality Gate & Anti-Fake Evaluation
+      run: |
+        python evals/run_quality_eval.py
+
+    - name: Run Stage 5 RAG Grounding & Traceability Evaluation
+      run: |
+        python evals/run_grounding_eval.py
     
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.11'

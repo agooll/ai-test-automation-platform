@@ -176,3 +176,148 @@ def test_evidence_repository_provenance_trail():
         assert trail["line_start"] == 10
         assert trail["line_end"] == 12
         assert trail["chunk_id"] == "CHK-USER-1"
+
+
+@pytest.mark.unit
+def test_evidence_build_node_disambiguates_target_repo():
+    """evidence_build_node scans target_repo rather than execution workspace when specified."""
+    with tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as ws_dir:
+        repo_path = Path(target_dir)
+        py_file = repo_path / "models.py"
+        py_file.write_text("class TargetModel:\n    pass\n", encoding="utf-8")
+
+        state = {
+            "target_repo": str(repo_path),
+            "workspace": str(ws_dir),
+            "requirement": "Verify TargetModel",
+            "pinned_commit": "commit_abc123",
+            "trace": [],
+        }
+
+        result = asyncio.run(evidence_build_node(state))
+        assert "evidence_catalog" in result
+        evs = result["evidence_catalog"]
+        assert any(e.value == "TargetModel" for e in evs)
+        model_ev = next(e for e in evs if e.value == "TargetModel")
+        assert model_ev.commit_sha == "commit_abc123"
+
+
+@pytest.mark.unit
+def test_claim_bind_node_extracts_inline_citations():
+    """claim_bind_node extracts # @cite annotations and computes citation accuracy."""
+    ev = EvidenceRecord(
+        evidence_id="EV-AUTH-VERIFY",
+        kind="target_symbol",
+        value="auth.TokenService",
+        source_id="s1",
+        source_path="auth.py",
+        source_chunk_id="c1",
+        extractor="ast_extractor",
+    )
+    code = """
+# @cite EV-AUTH-VERIFY
+def test_token_valid():
+    from auth import TokenService
+    TokenService.verify()
+"""
+    state = {
+        "generated_files": {"tests/test_token.py": code},
+        "target_entrypoint": "auth.TokenService",
+        "evidence_catalog": [ev],
+        "trace": [],
+    }
+
+    result = asyncio.run(claim_bind_node(state))
+    assert result["citation_accuracy"] == 1.0
+    assert result["grounded_claim_rate"] == 1.0
+
+
+@pytest.mark.unit
+def test_review_node_fail_closed_on_core_unknowns():
+    """_review_node demotes final verdict to NEEDS_REVIEW if core business fact claim is UNKNOWN."""
+    workflow = AgenticTestWorkflow(
+        planner=lambda s: {},
+        generator=lambda s: {},
+        repairer=lambda s: {},
+        reviewer=lambda s: {"status": "pass"},
+    )
+    state = {
+        "execution_result": {"passed": True, "exit_code": 0},
+        "code_quality_result": {"status": "PASS"},
+        "grounding_coverage_score": 0.95,
+        "provenance_completeness": True,
+        "grounded_claim_rate": 0.96,
+        "unknown_claims": [
+            {"kind": "api_endpoint", "value": "POST /api/v1/unknown_route", "status": "UNKNOWN"}
+        ],
+        "unsupported_claims": [],
+        "trace": [],
+    }
+    new_state = asyncio.run(workflow._review_node(state))
+    assert new_state["final_verdict"] == "NEEDS_REVIEW"
+
+
+@pytest.mark.unit
+def test_review_node_fail_closed_on_low_coverage():
+    """_review_node demotes final verdict to NEEDS_REVIEW if grounding_coverage_score < 0.80."""
+    workflow = AgenticTestWorkflow(
+        planner=lambda s: {},
+        generator=lambda s: {},
+        repairer=lambda s: {},
+        reviewer=lambda s: {"status": "pass"},
+    )
+    state = {
+        "execution_result": {"passed": True, "exit_code": 0},
+        "code_quality_result": {"status": "PASS"},
+        "grounding_coverage_score": 0.70,  # Below 0.80 threshold
+        "provenance_completeness": True,
+        "grounded_claim_rate": 0.98,
+        "unknown_claims": [],
+        "unsupported_claims": [],
+        "trace": [],
+    }
+    new_state = asyncio.run(workflow._review_node(state))
+    assert new_state["final_verdict"] == "NEEDS_REVIEW"
+
+
+@pytest.mark.unit
+def test_persist_node_relational_evidence_persistence():
+    """_persist_node saves evidence_catalog and claim_bindings to SQLite."""
+    workflow = AgenticTestWorkflow(
+        planner=lambda s: {},
+        generator=lambda s: {},
+        repairer=lambda s: {},
+        reviewer=lambda s: {"status": "pass"},
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = str(Path(tmpdir) / "evidence.sqlite")
+        ev = EvidenceRecord(
+            evidence_id="EV-PERSIST-1",
+            kind="api_endpoint",
+            value="GET /health",
+            source_id="s1",
+            source_path="health.py",
+            source_chunk_id="c1",
+            extractor="openapi_extractor",
+        )
+        binding = ClaimEvidenceBinding(
+            claim_id="CLM-P1",
+            kind="api_endpoint",
+            value="GET /health",
+            status="SUPPORTED",
+            evidence_ids=["EV-PERSIST-1"],
+            source_file="tests/test_h.py",
+        )
+        state = {
+            "evidence_db_path": db_path,
+            "evidence_catalog": [ev],
+            "claim_bindings": [binding],
+            "trace": [],
+        }
+        asyncio.run(workflow._persist_node(state))
+
+        repo = EvidenceRepository(db_path)
+        trail = repo.get_provenance_trail("EV-PERSIST-1")
+        assert trail is not None
+        assert trail["evidence_id"] == "EV-PERSIST-1"
+

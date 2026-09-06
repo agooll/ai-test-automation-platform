@@ -47,15 +47,24 @@ class AgentState(TypedDict, total=False):
     weakening_detected: bool
 
     # Stage 5 RAG Grounding & Traceability
+    target_repo: str | None
+    repo_path: str | None
     pinned_commit: str | None
+    used_evidence_ids: list[str]
     grounding_query_plan: dict[str, Any]
     evidence_bundle: dict[str, Any]
     evidence_catalog: list[Any]
     evidence_conflicts: list[dict[str, Any]]
     claim_bindings: list[dict[str, Any]]
+    unsupported_claims: list[dict[str, Any]]
+    unknown_claims: list[dict[str, Any]]
     grounding_coverage_score: float
+    grounded_claim_rate: float
     provenance_completeness: bool
+    citation_accuracy: float
     grounding_manifest: dict[str, Any]
     grounding_history: list[dict[str, Any]]
     repair_plan: dict[str, Any]
+    repair_rejected: bool
+    evidence_db_path: str | None
 

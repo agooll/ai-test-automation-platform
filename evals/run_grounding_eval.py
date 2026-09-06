@@ -7,10 +7,16 @@ import asyncio
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+
+# Ensure repository root is on sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from testteller.core.evidence.catalog import EvidenceCatalog2
 from testteller.core.evidence.catalog_builder import EvidenceCatalogBuilder
@@ -34,7 +40,6 @@ from testteller.core.evidence.models import EvidenceRecord, TrustLevel
 from testteller.core.evidence.repository import EvidenceRepository
 from testteller.core.retrieval.local_index import LocalIndex
 from testteller.core.retrieval.models import QueryAnalysis, QueryIntent
-from testteller.core.retrieval.query_planner import GroundingQueryPlanner
 from testteller.quality_gate.claim_binding import ClaimEvidenceBinder
 from testteller.quality_gate.code_models import ClaimItem
 from testteller.automator_agent.repair_planner import (
@@ -43,7 +48,7 @@ from testteller.automator_agent.repair_planner import (
     RepairPlan,
 )
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+FIXTURES_DIR = REPO_ROOT / "evals" / "fixtures" / "grounding"
 
 
 def get_git_commit() -> str:
@@ -61,49 +66,58 @@ def get_git_commit() -> str:
         return "unknown"
 
 
-def compute_suite_hash() -> str:
-    """Compute deterministic SHA-256 hash across evaluation definitions."""
-    content = "testteller_stage5_grounding_benchmark_suite_v1"
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+def compute_suite_hash(fixtures_dir: Path = FIXTURES_DIR) -> str:
+    """Compute deterministic SHA-256 hash across evaluation definitions and fixture contents."""
+    hasher = hashlib.sha256()
+    hasher.update(b"testteller_stage5_grounding_benchmark_suite_v2\n")
+    if fixtures_dir.exists():
+        for path in sorted(fixtures_dir.glob("*")):
+            if path.is_file():
+                hasher.update(path.name.encode("utf-8"))
+                hasher.update(path.read_bytes())
+    return hasher.hexdigest()[:16]
 
 
-async def run_stage5_benchmark() -> GroundingMetricsReport:
-    """Execute complete Stage 5 Grounding & Evidence Traceability benchmark suite."""
+async def run_stage5_benchmark(fixtures_dir: Path = FIXTURES_DIR) -> GroundingMetricsReport:
+    """Execute complete Stage 5 Grounding & Evidence Traceability benchmark suite (90 scenarios)."""
+    commit_sha = get_git_commit()
     results: List[GroundingBenchmarkScenarioResult] = []
+
+    # 1. Deterministic Extraction from Real Source Code and OpenAPI Fixtures
+    ast_extractor = PythonASTEvidenceExtractor()
+    openapi_extractor = OpenAPIEvidenceExtractor()
+
+    service_py = fixtures_dir / "service.py"
+    openapi_yaml = fixtures_dir / "openapi.yaml"
+
+    ast_records = ast_extractor.extract_from_file(service_py, commit_sha=commit_sha)
+    openapi_records = openapi_extractor.extract_from_file(openapi_yaml, commit_sha=commit_sha)
+    real_records = ast_records + openapi_records
+    real_catalog = EvidenceCatalog2(real_records)
 
     # -----------------------------------------------------------------------
     # 1. Provenance Completeness (10 scenarios)
     # -----------------------------------------------------------------------
-    for i in range(1, 11):
-        src_id = compute_source_id("testteller", "0842b24", f"src/module_{i}.py")
-        c_hash = compute_content_hash(f"def func_{i}(): pass\n")
-        chk_id = compute_chunk_id(src_id, 1, 2, c_hash)
-        ev_id = compute_evidence_id("target_symbol", f"func_{i}", chk_id)
-
-        rec = EvidenceRecord(
-            evidence_id=ev_id,
-            kind="target_symbol",
-            value=f"func_{i}",
-            source_id=src_id,
-            source_path=f"src/module_{i}.py",
-            source_chunk_id=chk_id,
-            line_start=1,
-            line_end=2,
-            commit_sha="0842b24",
-            content_hash=c_hash,
-            extractor="ast_extractor",
-            trust_level=TrustLevel.T0_AUTHORITATIVE,
-        )
-
+    sample_records = (ast_records[:5] + openapi_records[:5])
+    for idx, rec in enumerate(sample_records, 1):
         has_all_provenance = bool(
-            rec.source_id and rec.source_chunk_id and rec.source_path and rec.commit_sha and rec.content_hash
+            rec.source_id
+            and rec.source_chunk_id
+            and rec.source_path
+            and rec.commit_sha
+            and rec.content_hash
+            and rec.trust_level in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG)
         )
         results.append(
             GroundingBenchmarkScenarioResult(
-                scenario_name=f"provenance_completeness_{i:02d}",
+                scenario_name=f"provenance_completeness_{idx:02d}_{rec.value.replace('/', '_').replace(' ', '_')}",
                 category="provenance_completeness",
                 passed=has_all_provenance,
-                details={"evidence_id": ev_id, "source_id": src_id},
+                details={
+                    "evidence_id": rec.evidence_id,
+                    "source_id": rec.source_id,
+                    "commit_sha": rec.commit_sha,
+                },
             )
         )
 
@@ -112,30 +126,33 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
     # -----------------------------------------------------------------------
     with tempfile.TemporaryDirectory() as tmpdir:
         index = LocalIndex(tmpdir)
-        test_facts = [
-            ("api_endpoint", "GET", "/api/v1/users", "@app.get('/api/v1/users')\ndef get_users(): pass"),
-            ("api_endpoint", "POST", "/api/v1/users", "@app.post('/api/v1/users')\ndef post_users(): pass"),
-            ("api_endpoint", "DELETE", "/api/v1/users/{id}", "@app.delete('/api/v1/users/{id}')\ndef del_user(): pass"),
-            ("target_symbol", "", "UserService", "class UserService:\n    pass"),
-            ("target_symbol", "", "AuthHandler", "class AuthHandler:\n    pass"),
-            ("target_symbol", "", "TokenManager", "class TokenManager:\n    pass"),
-            ("config", "", "DATABASE_URL", 'url = os.getenv("DATABASE_URL")'),
-            ("config", "", "JWT_SECRET", 'sec = os.getenv("JWT_SECRET")'),
-            ("api_endpoint", "GET", "/health", "@app.get('/health')\ndef health(): return 'ok'"),
-            ("target_symbol", "", "OrderRepository", "class OrderRepository:\n    pass"),
-        ]
-        for idx, (kind, method, term, code) in enumerate(test_facts, 1):
-            meta = {
-                "source": f"src/comp_{idx}.py",
-                "source_id": f"SRC-{idx}",
-                "commit_sha": "0842b24",
-                "line_start": 1,
-                "line_end": 5,
-                "type": "code",
-            }
-            index.add_documents([code], [meta], [f"chunk-fact-{idx}"], "eval_col")
+        service_code = service_py.read_text(encoding="utf-8")
+        openapi_code = openapi_yaml.read_text(encoding="utf-8")
 
-        for idx, (kind, method, term, _) in enumerate(test_facts, 1):
+        index.add_documents(
+            [service_code, openapi_code],
+            [
+                {"source": "service.py", "source_id": "SRC-SVC", "commit_sha": commit_sha, "line_start": 1, "line_end": 40, "type": "code"},
+                {"source": "openapi.yaml", "source_id": "SRC-OPI", "commit_sha": commit_sha, "line_start": 1, "line_end": 40, "type": "openapi"},
+            ],
+            ["chunk-svc-1", "chunk-opi-1"],
+            "eval_collection",
+        )
+
+        test_facts = [
+            ("api_endpoint", "GET", "/api/v1/users"),
+            ("api_endpoint", "POST", "/api/v1/users"),
+            ("api_endpoint", "GET", "/api/v1/users/{id}"),
+            ("api_endpoint", "DELETE", "/api/v1/users/{id}"),
+            ("api_endpoint", "POST", "/api/v1/auth/login"),
+            ("api_endpoint", "GET", "/health"),
+            ("target_symbol", "", "UserService"),
+            ("target_symbol", "", "AuthService"),
+            ("target_symbol", "", "TokenManager"),
+            ("target_symbol", "", "get_user_by_id"),
+        ]
+
+        for idx, (kind, method, term) in enumerate(test_facts, 1):
             if kind == "api_endpoint":
                 analysis = QueryAnalysis(
                     query=f"{method} {term}",
@@ -143,49 +160,45 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
                     api_methods=[method],
                     api_paths=[term],
                 )
-            elif kind == "config":
-                analysis = QueryAnalysis(query=term, intent=QueryIntent.FACT_LOOKUP, config_keys=[term])
             else:
-                analysis = QueryAnalysis(query=term, intent=QueryIntent.FACT_LOOKUP, symbols=[term])
-
-            res = index.search(analysis, "eval_col", limit=3)
+                analysis = QueryAnalysis(
+                    query=term,
+                    intent=QueryIntent.FACT_LOOKUP,
+                    symbols=[term],
+                )
+            res = index.search(analysis, "eval_collection", limit=3)
             hit = len(res.items) > 0 and (res.match_type.value == "exact" or res.items[0].local_score >= 0.85)
             results.append(
                 GroundingBenchmarkScenarioResult(
-                    scenario_name=f"exact_lookup_{idx:02d}_{term}",
+                    scenario_name=f"exact_lookup_{idx:02d}_{term.replace('/', '_')}",
                     category="exact_lookup",
                     passed=hit,
-                    details={"term": term, "hit_count": len(res.items)},
+                    details={"term": term, "hit_count": len(res.items), "match_type": res.match_type.value},
                 )
             )
 
     # -----------------------------------------------------------------------
     # 3. Grounded Claim Rate (10 scenarios)
     # -----------------------------------------------------------------------
-    catalog_grounded = EvidenceCatalog2()
-    for i in range(1, 11):
-        rec = EvidenceRecord(
-            evidence_id=f"EV-GND-{i}",
-            kind="api_endpoint" if i % 2 == 0 else "target_symbol",
-            value=f"POST /api/test_{i}" if i % 2 == 0 else f"Service_{i}.run",
-            source_id=f"s{i}",
-            source_path=f"src/{i}.py",
-            source_chunk_id=f"c{i}",
-            content_hash=f"h{i}",
-            extractor="ast_extractor",
-            trust_level=TrustLevel.T0_AUTHORITATIVE,
-        )
-        catalog_grounded.add_record(rec)
-
-    for i in range(1, 11):
-        val = f"POST /api/test_{i}" if i % 2 == 0 else f"Service_{i}.run"
-        kind = "api_endpoint" if i % 2 == 0 else "target_symbol"
-        claim = ClaimItem(claim_id=f"CL-{i}", kind=kind, value=val, file_path="tests/t.py", line_number=i)
-        bind_res = ClaimEvidenceBinder.bind([claim], catalog_grounded)
+    facts_for_claims = [
+        ("api_endpoint", "GET /api/v1/users"),
+        ("api_endpoint", "POST /api/v1/users"),
+        ("api_endpoint", "GET /api/v1/users/{id}"),
+        ("api_endpoint", "DELETE /api/v1/users/{id}"),
+        ("api_endpoint", "POST /api/v1/auth/login"),
+        ("api_endpoint", "GET /health"),
+        ("target_symbol", "UserService"),
+        ("target_symbol", "UserService.get_user_by_id"),
+        ("target_symbol", "AuthService"),
+        ("target_symbol", "TokenManager"),
+    ]
+    for idx, (kind, val) in enumerate(facts_for_claims, 1):
+        claim = ClaimItem(claim_id=f"CL-GND-{idx}", kind=kind, value=val, file_path="tests/test_users.py", line_number=idx)
+        bind_res = ClaimEvidenceBinder.bind([claim], real_catalog)
         passed = bind_res.grounded_claim_rate == 1.0 and len(bind_res.unsupported_claims) == 0
         results.append(
             GroundingBenchmarkScenarioResult(
-                scenario_name=f"grounded_claim_{i:02d}",
+                scenario_name=f"grounded_claim_{idx:02d}_{val.replace('/', '_').replace(' ', '_')}",
                 category="grounded_claim",
                 passed=passed,
                 details={"claim": val, "grounded_rate": bind_res.grounded_claim_rate},
@@ -195,16 +208,16 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
     # -----------------------------------------------------------------------
     # 4. Citation Accuracy (10 scenarios)
     # -----------------------------------------------------------------------
-    for i in range(1, 11):
-        val = f"POST /api/test_{i}" if i % 2 == 0 else f"Service_{i}.run"
-        kind = "api_endpoint" if i % 2 == 0 else "target_symbol"
-        claim = ClaimItem(claim_id=f"CL-CIT-{i}", kind=kind, value=val, file_path="tests/t.py")
-        valid_ev_id = f"EV-GND-{i}"
-        bind_res = ClaimEvidenceBinder.bind([claim], catalog_grounded, claimed_citations=[valid_ev_id])
+    for idx, (kind, val) in enumerate(facts_for_claims, 1):
+        claim = ClaimItem(claim_id=f"CL-CIT-{idx}", kind=kind, value=val, file_path="tests/test_users.py", line_number=idx)
+        matched_rec = real_catalog.find_match(kind, val)
+        assert matched_rec is not None, f"Expected match for {kind} {val}"
+        valid_ev_id = matched_rec.evidence_id
+        bind_res = ClaimEvidenceBinder.bind([claim], real_catalog, claimed_citations=[valid_ev_id])
         passed = bind_res.citation_accuracy == 1.0
         results.append(
             GroundingBenchmarkScenarioResult(
-                scenario_name=f"citation_accuracy_{i:02d}",
+                scenario_name=f"citation_accuracy_{idx:02d}",
                 category="citation_accuracy",
                 passed=passed,
                 details={"claimed_citation": valid_ev_id, "accuracy": bind_res.citation_accuracy},
@@ -214,76 +227,127 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
     # -----------------------------------------------------------------------
     # 5. Unsupported Fact Detection (10 scenarios)
     # -----------------------------------------------------------------------
-    for i in range(1, 11):
-        fake_val = f"POST /api/v99/fabricated_{i}"
-        claim = ClaimItem(claim_id=f"CL-FAKE-{i}", kind="api_endpoint", value=fake_val, file_path="tests/fake.py")
-        bind_res = ClaimEvidenceBinder.bind([claim], catalog_grounded)
-        detected_unsupported = (
+    fake_facts = [
+        ("api_endpoint", "POST /api/v99/fabricated_action"),
+        ("api_endpoint", "DELETE /api/v2/ghost_resource"),
+        ("api_endpoint", "GET /admin/backdoor"),
+        ("target_symbol", "FabricatedService"),
+        ("target_symbol", "UserService.non_existent_method"),
+        ("target_symbol", "AuthService.bypass_security"),
+        ("target_symbol", "FakeOrderClass.process"),
+        ("api_endpoint", "GET /internal/secret_metrics"),
+    ]
+    for idx, (kind, fake_val) in enumerate(fake_facts, 1):
+        claim = ClaimItem(claim_id=f"CL-FAKE-{idx}", kind=kind, value=fake_val, file_path="tests/test_fake.py")
+        bind_res = ClaimEvidenceBinder.bind([claim], real_catalog)
+        detected = (
             bind_res.grounded_claim_rate == 0.0
             and len(bind_res.unsupported_claims) == 1
             and bind_res.has_blocking_violations is True
         )
         results.append(
             GroundingBenchmarkScenarioResult(
-                scenario_name=f"unsupported_detection_{i:02d}",
+                scenario_name=f"unsupported_detection_{idx:02d}_{fake_val.replace('/', '_').replace(' ', '_')}",
                 category="unsupported_detection",
-                passed=detected_unsupported,
+                passed=detected,
                 details={"fake_value": fake_val, "violations": len(bind_res.violations)},
             )
         )
 
+    # 2 T4 unverified trust scenarios (T4 must NEVER support a factual claim)
+    t4_catalog = EvidenceCatalog2(real_records)
+    t4_rec_api = EvidenceRecord(
+        evidence_id="EV-T4-API",
+        kind="api_endpoint",
+        value="POST /api/v1/inferred_only",
+        source_id="s_llm",
+        source_path="llm_inference.txt",
+        source_chunk_id="c_llm",
+        commit_sha=commit_sha,
+        extractor="llm_inference",
+        trust_level=TrustLevel.T4_UNVERIFIED,
+    )
+    t4_rec_sym = EvidenceRecord(
+        evidence_id="EV-T4-SYM",
+        kind="target_symbol",
+        value="InferredHelper.call",
+        source_id="s_llm",
+        source_path="llm_inference.txt",
+        source_chunk_id="c_llm",
+        commit_sha=commit_sha,
+        extractor="llm_inference",
+        trust_level=TrustLevel.T4_UNVERIFIED,
+    )
+    t4_catalog.add_record(t4_rec_api)
+    t4_catalog.add_record(t4_rec_sym)
+
+    for idx, (t4_kind, t4_val) in enumerate([("api_endpoint", "POST /api/v1/inferred_only"), ("target_symbol", "InferredHelper.call")], 9):
+        claim = ClaimItem(claim_id=f"CL-T4-{idx}", kind=t4_kind, value=t4_val, file_path="tests/test_t4.py")
+        bind_res = ClaimEvidenceBinder.bind([claim], t4_catalog)
+        t4_rejected = (
+            bind_res.grounded_claim_rate == 0.0
+            and len(bind_res.unsupported_claims) == 1
+            and bind_res.has_blocking_violations is True
+        )
+        results.append(
+            GroundingBenchmarkScenarioResult(
+                scenario_name=f"unsupported_detection_{idx:02d}_t4_rejection",
+                category="unsupported_detection",
+                passed=t4_rejected,
+                details={"t4_value": t4_val, "status": bind_res.bindings[0].status},
+            )
+        )
+
     # -----------------------------------------------------------------------
-    # 6. Conflict Detection (10 scenarios)
+    # 6. Conflict Detection & Authoritative Resolution (10 scenarios)
     # -----------------------------------------------------------------------
-    resolver = ConflictResolver(pinned_commit="pinned_v2")
+    resolver = ConflictResolver(pinned_commit=commit_sha)
     for i in range(1, 11):
-        ev_open = EvidenceRecord(
-            evidence_id=f"EV-CONF-OPEN-{i}",
+        ev_authoritative = EvidenceRecord(
+            evidence_id=f"EV-AUTH-{i}",
             kind="api_endpoint",
-            value=f"POST /api/v2/resource_{i}",
-            source_id=f"s_api_{i}",
+            value=f"POST /api/v1/resource_{i}",
+            source_id=f"s_openapi_{i}",
             source_path="openapi.yaml",
-            source_chunk_id=f"c_api_{i}",
-            commit_sha="pinned_v2",
+            source_chunk_id=f"c_openapi_{i}",
+            commit_sha=commit_sha,
             extractor="openapi_extractor",
             trust_level=TrustLevel.T0_AUTHORITATIVE,
         )
-        ev_doc = EvidenceRecord(
-            evidence_id=f"EV-CONF-DOC-{i}",
+        ev_stale_doc = EvidenceRecord(
+            evidence_id=f"EV-DOC-{i}",
             kind="api_endpoint",
-            value=f"POST /api/v1/resource_{i}",
+            value=f"POST /api/v2/resource_{i}",
             source_id=f"s_doc_{i}",
             source_path="README.md",
             source_chunk_id=f"c_doc_{i}",
-            commit_sha="stale_v1",
+            commit_sha="stale_v0",
             extractor="doc_extractor",
             trust_level=TrustLevel.T2_SUPPORTING,
         )
-        retained, conflicts = resolver.detect_and_resolve([ev_open, ev_doc])
+        retained, conflicts = resolver.detect_and_resolve([ev_authoritative, ev_stale_doc])
         conflict_handled = (
             len(conflicts) == 1
-            and conflicts[0].resolved_evidence_id == f"EV-CONF-OPEN-{i}"
+            and conflicts[0].resolved_evidence_id == f"EV-AUTH-{i}"
             and len(retained) == 1
-            and retained[0].evidence_id == f"EV-CONF-OPEN-{i}"
+            and retained[0].evidence_id == f"EV-AUTH-{i}"
         )
         results.append(
             GroundingBenchmarkScenarioResult(
                 scenario_name=f"conflict_detection_{i:02d}",
                 category="conflict_detection",
                 passed=conflict_handled,
-                details={"subject": conflicts[0].subject if conflicts else "none"},
+                details={"resolved_to": retained[0].evidence_id if retained else "none"},
             )
         )
 
     # -----------------------------------------------------------------------
     # 7. Unknown Handling (0% False Acceptance as SUPPORTED) (10 scenarios)
     # -----------------------------------------------------------------------
-    empty_catalog = EvidenceCatalog2()  # no evidence for ui_selector domain
     for i in range(1, 11):
-        selector_val = f"#btn-action-{i}"
+        selector_val = f"#btn-login-action-{i}"
         claim = ClaimItem(claim_id=f"CL-UNK-{i}", kind="ui_selector", value=selector_val, file_path="t.py")
-        bind_res = ClaimEvidenceBinder.bind([claim], empty_catalog)
-        # UNKNOWN must NOT be marked SUPPORTED
+        bind_res = ClaimEvidenceBinder.bind([claim], real_catalog)
         handled_as_unknown = (
             len(bind_res.unknown_claims) == 1
             and bind_res.unknown_claims[0].status == "UNKNOWN"
@@ -302,16 +366,16 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
     # -----------------------------------------------------------------------
     # 8. Stale Evidence False Selection (0% Stale selection) (10 scenarios)
     # -----------------------------------------------------------------------
-    stale_resolver = ConflictResolver(pinned_commit="pinned_v3")
+    stale_resolver = ConflictResolver(pinned_commit=commit_sha)
     for i in range(1, 11):
         ev_stale = EvidenceRecord(
             evidence_id=f"EV-OLD-{i}",
             kind="api_endpoint",
             value=f"GET /v1/items_{i}",
-            source_id="s1",
+            source_id="s_old",
             source_path="src/v1.py",
-            source_chunk_id="c1",
-            commit_sha="old_commit",
+            source_chunk_id="c_old",
+            commit_sha="stale_commit_sha",
             extractor="ast_extractor",
             trust_level=TrustLevel.T0_AUTHORITATIVE,
         )
@@ -319,15 +383,15 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
             evidence_id=f"EV-NEW-{i}",
             kind="api_endpoint",
             value=f"GET /v2/items_{i}",
-            source_id="s2",
+            source_id="s_new",
             source_path="src/v2.py",
-            source_chunk_id="c2",
-            commit_sha="pinned_v3",
+            source_chunk_id="c_new",
+            commit_sha=commit_sha,
             extractor="ast_extractor",
             trust_level=TrustLevel.T0_AUTHORITATIVE,
         )
         retained, _ = stale_resolver.detect_and_resolve([ev_stale, ev_pinned])
-        pinned_selected = len(retained) == 1 and retained[0].evidence_id == f"EV-NEW-{i}"
+        pinned_selected = (len(retained) == 1 and retained[0].evidence_id == f"EV-NEW-{i}")
         results.append(
             GroundingBenchmarkScenarioResult(
                 scenario_name=f"stale_evidence_{i:02d}",
@@ -353,8 +417,7 @@ async def run_stage5_benchmark() -> GroundingMetricsReport:
             expectation_changes=[f"status_code 200 -> 201 on endpoint_{i}"],
             required_evidence_ids=[],  # NO evidence provided!
         )
-        validated = RepairGroundingPlanner.validate_repair_plan(plan, catalog_grounded)
-        # Must be rejected because required_evidence_ids is empty
+        validated = RepairGroundingPlanner.validate_repair_plan(plan, real_catalog)
         rejected_correctly = (validated.allow_repair is False and validated.rejection_reason is not None)
         results.append(
             GroundingBenchmarkScenarioResult(
@@ -389,10 +452,10 @@ def format_markdown_report(report: GroundingMetricsReport) -> str:
 | Hard Metric Dimension | Target Threshold | Actual Measured | Status |
 |---|---|---|---|
 | **Evidence Provenance Completeness** | = 100% | **{report.evidence_provenance_completeness * 100:6.2f}%** | {"PASS ✅" if report.evidence_provenance_completeness >= 1.0 else "FAIL ❌"} |
-| **Exact Fact Hit Rate** | $\ge$ 98% | **{report.exact_fact_hit_rate * 100:6.2f}%** | {"PASS ✅" if report.exact_fact_hit_rate >= 0.98 else "FAIL ❌"} |
-| **Grounded Claim Rate** | $\ge$ 95% | **{report.grounded_claim_rate * 100:6.2f}%** | {"PASS ✅" if report.grounded_claim_rate >= 0.95 else "FAIL ❌"} |
-| **Citation Accuracy** | $\ge$ 95% | **{report.citation_accuracy * 100:6.2f}%** | {"PASS ✅" if report.citation_accuracy >= 0.95 else "FAIL ❌"} |
-| **Unsupported Fact Detection Rate** | $\ge$ 95% | **{report.unsupported_fact_detection_rate * 100:6.2f}%** | {"PASS ✅" if report.unsupported_fact_detection_rate >= 0.95 else "FAIL ❌"} |
+| **Exact Fact Hit Rate** | $\\ge$ 98% | **{report.exact_fact_hit_rate * 100:6.2f}%** | {"PASS ✅" if report.exact_fact_hit_rate >= 0.98 else "FAIL ❌"} |
+| **Grounded Claim Rate** | $\\ge$ 95% | **{report.grounded_claim_rate * 100:6.2f}%** | {"PASS ✅" if report.grounded_claim_rate >= 0.95 else "FAIL ❌"} |
+| **Citation Accuracy** | $\\ge$ 95% | **{report.citation_accuracy * 100:6.2f}%** | {"PASS ✅" if report.citation_accuracy >= 0.95 else "FAIL ❌"} |
+| **Unsupported Fact Detection Rate** | $\\ge$ 95% | **{report.unsupported_fact_detection_rate * 100:6.2f}%** | {"PASS ✅" if report.unsupported_fact_detection_rate >= 0.95 else "FAIL ❌"} |
 | **Conflict Detection Rate** | = 100% | **{report.conflict_detection_rate * 100:6.2f}%** | {"PASS ✅" if report.conflict_detection_rate >= 1.0 else "FAIL ❌"} |
 | **Unknown False Acceptance Rate** | = 0% | **{report.unknown_false_acceptance_rate * 100:6.2f}%** | {"PASS ✅" if report.unknown_false_acceptance_rate == 0.0 else "FAIL ❌"} |
 | **Stale Evidence False Selection Rate** | = 0% | **{report.stale_evidence_false_selection_rate * 100:6.2f}%** | {"PASS ✅" if report.stale_evidence_false_selection_rate == 0.0 else "FAIL ❌"} |
@@ -429,7 +492,6 @@ async def main():
         help="Path to output Markdown report",
     )
     args = parser.parse_args()
-    import sys
     if sys.platform == "win32":
         try:
             sys.stdout.reconfigure(encoding="utf-8")

@@ -60,17 +60,42 @@ async def grounding_plan_node(state: AgentState) -> Dict[str, Any]:
 
 async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
     """Extract deterministic facts, aggregate with retrieved context, and resolve conflicts."""
-    workspace = state.get("workspace", "")
+    target_repo = state.get("target_repo") or state.get("repo_path") or state.get("workspace", "")
     target_ep = state.get("target_entrypoint")
     pinned_commit = state.get("pinned_commit")
-    extracted: List[EvidenceRecord] = []
+    if not pinned_commit and target_repo and Path(target_repo).exists():
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=target_repo,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                pinned_commit = res.stdout.strip()
+        except Exception:
+            pinned_commit = None
 
-    # 1. AST extraction if workspace exists
-    if workspace and Path(workspace).exists():
+    extracted: List[EvidenceRecord] = []
+    for ev in state.get("evidence_catalog", []):
+        if isinstance(ev, EvidenceRecord):
+            extracted.append(ev)
+        elif isinstance(ev, dict):
+            try:
+                d = dict(ev)
+                d.setdefault("extractor", "extracted")
+                extracted.append(EvidenceRecord(**d))
+            except Exception:
+                pass
+
+    # 1. AST extraction if target_repo exists
+    if target_repo and Path(target_repo).exists():
         ast_extractor = PythonASTEvidenceExtractor()
-        ws_path = Path(workspace)
+        repo_path = Path(target_repo)
         # Scan top-level py files or target entrypoint
-        for py_file in ws_path.glob("**/*.py"):
+        for py_file in repo_path.glob("**/*.py"):
             if any(part.startswith((".", "venv", "build", "tests")) for part in py_file.parts):
                 continue
             try:
@@ -85,7 +110,7 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
 
         # Scan for OpenAPI JSON/YAML specs
         openapi_extractor = OpenAPIEvidenceExtractor()
-        for spec_file in list(ws_path.glob("**/openapi.yaml")) + list(ws_path.glob("**/openapi.json")):
+        for spec_file in list(repo_path.glob("**/openapi.yaml")) + list(repo_path.glob("**/openapi.json")) + list(repo_path.glob("**/openapi.yml")):
             try:
                 extracted.extend(
                     openapi_extractor.extract_from_file(
@@ -96,10 +121,12 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # 2. Build EvidenceBundle
+    # 2. Build EvidenceBundle with both extracted records and retrieved context
+    retrieved_items = state.get("retrieved_context", [])
     builder = EvidenceCatalogBuilder(pinned_commit=pinned_commit)
     bundle = builder.build_bundle(
         extracted_records=extracted,
+        retrieved_items=retrieved_items,
         query_plan=state.get("grounding_query_plan"),
     )
 
@@ -181,8 +208,15 @@ async def claim_bind_node(state: AgentState) -> Dict[str, Any]:
                 pass
     catalog = EvidenceCatalog2(records)
 
-    # 3. Bind claims to evidence
-    claimed_citations = []
+    # 3. Extract claimed citations from inline annotations and used_evidence_ids
+    claimed_citations_set = set(state.get("used_evidence_ids", []))
+    import re
+    for file_path, code in files.items():
+        found = re.findall(r"#\s*@cite\s+([A-Za-z0-9_\-]+)", code)
+        claimed_citations_set.update(found)
+    claimed_citations = list(claimed_citations_set)
+
+    # 4. Bind claims to evidence
     result = ClaimEvidenceBinder.bind(
         claims=all_claims,
         catalog=catalog,
@@ -204,7 +238,9 @@ async def claim_bind_node(state: AgentState) -> Dict[str, Any]:
         "claim_bindings": [b.model_dump() for b in result.bindings],
         "grounding_manifest": result.grounding_manifest,
         "grounded_claim_rate": result.grounded_claim_rate,
+        "citation_accuracy": result.citation_accuracy,
         "unsupported_claims": [b.model_dump() for b in result.unsupported_claims],
+        "unknown_claims": [b.model_dump() for b in result.unknown_claims],
         "trace": trace,
     }
 

@@ -8,6 +8,10 @@ This package provides RAG-enhanced test automation generation using vector store
 - Quality validation and assessment
 """
 
-from .cli import automate_command
+def __getattr__(name: str):
+    if name == "automate_command":
+        from .cli import automate_command
+        return automate_command
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = ["automate_command"]

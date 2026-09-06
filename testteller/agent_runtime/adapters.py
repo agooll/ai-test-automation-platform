@@ -56,12 +56,70 @@ class ExistingRAGAdapter:
                     "source": ev.source,
                     "confidence": ev.confidence,
                     "content": f"Verified {ev.kind}: {ev.value} (Source: {ev.source})",
-                    "metadata": {"source": ev.source, "type": "evidence", "kind": ev.kind},
+                    "metadata": {"source": ev.source, "type": "evidence", "kind": ev.kind, "trust_level": "T1_STRONG"},
                 })
         except Exception:
             pass
 
-        # 2. Query similar raw documents from vector store
+        # 2. Execute GroundingQueryPlan using HybridRetriever if available
+        plan_data = state.get("grounding_query_plan")
+        if plan_data and vs:
+            try:
+                local_idx = getattr(vs, "local_index", None)
+                if not local_idx and hasattr(vs, "persist_directory"):
+                    local_idx = LocalIndex(vs.persist_directory)
+
+                if local_idx:
+                    from ..core.retrieval.hybrid_retriever import HybridRetriever
+                    from ..core.retrieval.query_planner import GroundingQuery, GroundingQueryPlan
+
+                    # Reconstruct plan if dict
+                    if isinstance(plan_data, dict):
+                        queries = [
+                            GroundingQuery(
+                                query_id=q.get("query_id", f"Q{idx}"),
+                                kind=q.get("kind", "requirement"),
+                                text=q.get("text", ""),
+                                required=q.get("required", True),
+                                exact_terms=q.get("exact_terms", []),
+                            )
+                            for idx, q in enumerate(plan_data.get("queries", []))
+                        ]
+                        plan = GroundingQueryPlan(
+                            plan_id=plan_data.get("plan_id", "plan_1"),
+                            queries=queries,
+                            target_entrypoint=plan_data.get("target_entrypoint"),
+                        )
+                    else:
+                        plan = plan_data
+
+                    retriever = HybridRetriever(vs, local_idx)
+                    col_name = getattr(vs, "collection_name", "benchmark_v1")
+                    pinned_commit = state.get("pinned_commit")
+                    plan_items = await retriever.retrieve_plan(
+                        plan=plan,
+                        collection_name=col_name,
+                        limit_per_query=3,
+                        total_limit=10,
+                        pinned_commit=pinned_commit,
+                    )
+                    for item in plan_items:
+                        meta = item.metadata or {}
+                        results.append({
+                            "id": item.document_id or item.chunk_id,
+                            "chunk_id": item.chunk_id,
+                            "content": item.content,
+                            "metadata": meta,
+                            "distance": getattr(item, "vector_score", 0.0),
+                            "source": item.source or meta.get("source") or meta.get("file_path") or "",
+                            "match_rules": getattr(item, "match_rules", []),
+                            "type": "retrieval_item",
+                        })
+                    return results
+            except Exception:
+                pass
+
+        # 3. Fallback: Query similar raw documents from vector store
         try:
             if hasattr(vs, "query_similar"):
                 raw = await asyncio.to_thread(vs.query_similar, query, n_results=self.generator.num_context_docs)
@@ -94,6 +152,18 @@ class ExistingRAGAdapter:
         return results
 
     async def generate(self, state: AgentState) -> dict[str, str]:
+        # Inject evidence catalog into generator application context if present
+        ev_items = state.get("evidence_catalog", [])
+        evidence_summary_lines = []
+        valid_ev_ids = set()
+        for e in ev_items:
+            eid = getattr(e, "evidence_id", "") or (e.get("evidence_id", "") if isinstance(e, dict) else "")
+            ekind = getattr(e, "kind", "") or (e.get("kind", "") if isinstance(e, dict) else "")
+            eval_ = getattr(e, "value", "") or (e.get("value", "") if isinstance(e, dict) else "")
+            if eid and ekind and eval_:
+                evidence_summary_lines.append(f"- [{eid}] {ekind}: {eval_}")
+                valid_ev_ids.add(eid)
+
         try:
             files = await self.generator.generate(self.test_cases)
         except Exception:
@@ -109,6 +179,17 @@ class ExistingRAGAdapter:
                 mapped[f"tests/{k}"] = v
             else:
                 mapped[k] = v
+
+        # Extract and verify citations from generated files
+        used_ids = []
+        for code in mapped.values():
+            found = re.findall(r"#\s*@cite\s+([A-Za-z0-9_\-]+)", code)
+            for fid in found:
+                if fid in valid_ev_ids and fid not in used_ids:
+                    used_ids.append(fid)
+
+        # Record used_evidence_ids in state if possible
+        state["used_evidence_ids"] = used_ids
         return mapped
 
     async def repair(self, state: AgentState) -> dict[str, str]:

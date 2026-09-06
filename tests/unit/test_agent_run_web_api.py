@@ -63,6 +63,19 @@ async def test_agent_run_api_lifecycle(tmp_path: Path):
             "test_command": ["python", "-m", "pytest", "-q"],
             "human_review": False,
             "target_entrypoint": "app.compute",
+            "evidence_catalog": [
+                {
+                    "evidence_id": "EV-APP-COMPUTE",
+                    "kind": "target_symbol",
+                    "value": "app.compute",
+                    "source": "app.py",
+                    "source_id": "s1",
+                    "source_path": "app.py",
+                    "source_chunk_id": "c1",
+                    "trust_level": "T0_AUTHORITATIVE",
+                    "extractor": "ast_extractor",
+                }
+            ],
         },
     )
 
@@ -200,6 +213,19 @@ async def test_sse_event_ordering_and_review_decoupling(tmp_path: Path):
             "test_command": ["python", "-m", "pytest", "-q"],
             "human_review": False,
             "target_entrypoint": "app.compute",
+            "evidence_catalog": [
+                {
+                    "evidence_id": "EV-APP-COMPUTE",
+                    "kind": "target_symbol",
+                    "value": "app.compute",
+                    "source": "app.py",
+                    "source_id": "s1",
+                    "source_path": "app.py",
+                    "source_chunk_id": "c1",
+                    "trust_level": "T0_AUTHORITATIVE",
+                    "extractor": "ast_extractor",
+                }
+            ],
         },
     )
 

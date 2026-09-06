@@ -17,6 +17,7 @@ from langgraph.types import Command, interrupt
 
 from .state import AgentState
 from .checkpoint import AsyncCheckpointStore, CheckpointStore
+from pathlib import Path
 from .tools import AgentToolRegistry, SafeTestExecutor, SandboxPolicy, WorkspaceArtifacts, create_test_executor
 from .trace import TraceRecorder
 from .grounding_nodes import (
@@ -27,6 +28,12 @@ from .grounding_nodes import (
 )
 from ..quality_gate.code_gate import AutomationCodeQualityGate
 from ..quality_gate.code_models import CodeQualityGateResult
+from ..quality_gate.claim_binding import ClaimEvidenceBinding
+from ..core.evidence.catalog import EvidenceCatalog2
+from ..core.evidence.catalog_builder import EvidenceCatalogBuilder
+from ..core.evidence.models import EvidenceRecord
+from ..core.evidence.repository import EvidenceRepository
+from ..automator_agent.repair_planner import RepairGroundingPlanner, RepairPlan
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +213,38 @@ class AgenticTestWorkflow:
 
     async def _repair_grounding_node(self, state: AgentState) -> AgentState:
         res = await repair_grounding_node(state)
-        return self._record(state, "repair_grounding", res)
+        new_state = self._record(state, "repair_grounding", res)
+        # Actively retrieve additional evidence for formulated repair queries if retriever is present
+        repair_plan = res.get("repair_plan", {})
+        queries = repair_plan.get("queries", [])
+        if queries and self.retriever:
+            repair_query_plan = {
+                "plan_id": f"repair_{state.get('repair_round', 0) + 1}",
+                "queries": queries,
+            }
+            temp_state = {**new_state, "grounding_query_plan": repair_query_plan}
+            try:
+                repair_context = await _maybe_call(self.retriever, temp_state)
+                if repair_context:
+                    combined_context = list(new_state.get("retrieved_context", [])) + list(repair_context)
+                    builder = EvidenceCatalogBuilder(pinned_commit=new_state.get("pinned_commit"))
+                    bundle = builder.build_bundle(
+                        extracted_records=[
+                            r for r in new_state.get("evidence_catalog", [])
+                            if isinstance(r, EvidenceRecord)
+                        ],
+                        retrieved_items=combined_context,
+                        query_plan=repair_query_plan,
+                    )
+                    update: AgentState = {
+                        "retrieved_context": combined_context,
+                        "evidence_catalog": bundle.evidence,
+                        "grounding_coverage_score": bundle.coverage_score,
+                    }
+                    new_state = {**new_state, **update}
+            except Exception as ex:
+                logger.warning("Failed active retrieval in repair_grounding_node: %s", ex)
+        return new_state
 
     async def _plan_node(self, state: AgentState) -> AgentState:
         result = await _maybe_call(self.planner, state)
@@ -340,6 +378,36 @@ class AgenticTestWorkflow:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
         before_files = dict(state.get("generated_files", {}))
         repaired_files = await _maybe_call(self.repairer, state)
+
+        # Build catalog for repair plan validation
+        catalog_records = []
+        for r in state.get("evidence_catalog", []):
+            if isinstance(r, EvidenceRecord):
+                catalog_records.append(r)
+            elif isinstance(r, dict):
+                try:
+                    catalog_records.append(EvidenceRecord(**r))
+                except Exception:
+                    pass
+        catalog = EvidenceCatalog2(catalog_records)
+
+        # Stage 5.6 Invariant: Validate repair plan if expectation changes are specified
+        state_repair_plan = state.get("repair_plan", {})
+        plan_obj = RepairPlan(
+            root_cause=state_repair_plan.get("root_cause", "execution_failure"),
+            expectation_changes=state_repair_plan.get("expectation_changes", []),
+            required_evidence_ids=state_repair_plan.get("required_evidence_ids", []),
+        )
+        validated_plan = RepairGroundingPlanner.validate_repair_plan(plan_obj, catalog)
+        if not validated_plan.allow_repair:
+            round_num = state.get("repair_round", 0) + 1
+            update: AgentState = {
+                "repair_round": round_num,
+                "repair_rejected": True,
+                "error": validated_plan.rejection_reason,
+            }
+            return self._record(state, "repair", update)
+
         write_result = await self.tools.invoke("write_files", workspace=ws, files=repaired_files)
         round_num = state.get("repair_round", 0) + 1
 
@@ -396,23 +464,48 @@ class AgenticTestWorkflow:
         rev_status = review.get("status", "uncertain")
 
         # Stage 5 Hard Invariant: final PASS requires:
-        # Execution PASS AND code quality PASS AND semantic review pass
-        # AND no blocking evidence conflict AND no unsupported claims
+        # 1. Execution PASS
+        # 2. Code quality PASS and no weakening detected
+        # 3. Semantic review PASS
+        # 4. No blocking evidence conflicts
+        # 5. No unsupported claims (0 hallucination)
+        # 6. No unindexed core business facts (api_endpoint, target_symbol, model_field) in unknown_claims
+        # 7. Grounding coverage >= 0.80
+        # 8. Provenance completeness == True
+        # 9. Grounded claim rate >= 0.95
+        # 10. Repair was not rejected for ungrounded changes
         has_blocking_conflict = any(
             isinstance(c, dict) and c.get("severity") == "blocking"
             for c in state.get("evidence_conflicts", [])
         )
         unsupported = state.get("unsupported_claims", [])
+        unknown_claims = state.get("unknown_claims", [])
+        core_unknowns = [
+            c for c in unknown_claims
+            if isinstance(c, dict) and c.get("kind") in ("api_endpoint", "target_symbol", "model_field")
+        ]
+        has_core_unknowns = len(core_unknowns) > 0
+
+        coverage_score = state.get("grounding_coverage_score", state.get("evidence_bundle", {}).get("coverage_score", 1.0))
+        provenance_complete = state.get("provenance_completeness", state.get("evidence_bundle", {}).get("provenance_complete", True))
+        grounded_claim_rate = state.get("grounded_claim_rate", 1.0)
+        weakening_detected = state.get("weakening_detected", False)
+        repair_rejected = state.get("repair_rejected", False)
 
         if not exec_passed:
             exit_code = execution.get("exit_code")
             verdict = "REJECTED" if exit_code not in (0, None) else "NEEDS_REVIEW"
-        elif cq_status == "REJECTED" or unsupported:
+        elif cq_status == "REJECTED" or rev_status == "fail" or unsupported or weakening_detected or repair_rejected:
             verdict = "REJECTED"
-        elif cq_status == "NEEDS_REVIEW" or has_blocking_conflict:
+        elif (
+            cq_status == "NEEDS_REVIEW"
+            or has_blocking_conflict
+            or has_core_unknowns
+            or coverage_score < 0.80
+            or not provenance_complete
+            or grounded_claim_rate < 0.95
+        ):
             verdict = "NEEDS_REVIEW"
-        elif rev_status == "fail":
-            verdict = "REJECTED"
         elif rev_status == "uncertain":
             verdict = "NEEDS_REVIEW"
         else:
@@ -446,6 +539,37 @@ class AgenticTestWorkflow:
         updated = self._record(state, "persist", {})
         if state.get("trace_path"):
             TraceRecorder(state["trace_path"]).write_run(updated)
+
+        # Stage 5 Relational Evidence Persistence in SQLite
+        db_path = state.get("evidence_db_path")
+        if not db_path and state.get("workspace"):
+            db_path = str(Path(state["workspace"]) / "evidence.sqlite")
+        elif not db_path and state.get("trace_path"):
+            db_path = str(Path(state["trace_path"]).parent / "evidence.sqlite")
+
+        if db_path:
+            try:
+                repo = EvidenceRepository(db_path)
+                for ev in state.get("evidence_catalog", []):
+                    if isinstance(ev, EvidenceRecord):
+                        repo.save_evidence_record(ev)
+                    elif isinstance(ev, dict) and "evidence_id" in ev and "source_id" in ev:
+                        try:
+                            repo.save_evidence_record(EvidenceRecord(**ev))
+                        except Exception:
+                            pass
+
+                for cb in state.get("claim_bindings", []):
+                    if isinstance(cb, ClaimEvidenceBinding):
+                        repo.save_claim_binding(cb)
+                    elif isinstance(cb, dict) and "claim_id" in cb:
+                        try:
+                            repo.save_claim_binding(ClaimEvidenceBinding(**cb))
+                        except Exception:
+                            pass
+            except Exception as ex:
+                logger.warning("Failed to persist evidence repository to %s: %s", db_path, ex)
+
         return updated
 
     def _route_after_code_quality(self, state: AgentState) -> Literal["execute", "analyze_failure", "review"]:

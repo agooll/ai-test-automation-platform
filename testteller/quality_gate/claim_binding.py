@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from testteller.core.evidence.catalog import EvidenceCatalog2
-from testteller.core.evidence.models import EvidenceRecord
+from testteller.core.evidence.models import EvidenceRecord, TrustLevel
 from testteller.quality_gate.code_models import (
     ClaimItem,
     CodeViolation,
@@ -96,7 +96,16 @@ class ClaimEvidenceBinder:
                 else:
                     match = catalog.find_match(claim)
 
-            if match:
+            match_trust = getattr(match, "trust_level", None) if match else None
+            if isinstance(match_trust, str):
+                try:
+                    match_trust = TrustLevel(match_trust)
+                except Exception:
+                    pass
+
+            is_t4 = (match_trust == TrustLevel.T4_UNVERIFIED)
+
+            if match and not is_t4:
                 ev_id = getattr(match, "evidence_id", "EV-UNKNOWN")
                 src_path = getattr(match, "source_path", getattr(match, "source", "unknown"))
                 chunk_id = getattr(match, "source_chunk_id", "CHK-UNKNOWN")
@@ -131,6 +140,43 @@ class ClaimEvidenceBinder:
                         status="SUPPORTED",
                         evidence_id=ev_id,
                         message=binding.message,
+                        source_file=claim.file_path,
+                    )
+                )
+            elif match and is_t4:
+                # Invariant: T4_UNVERIFIED cannot support a factual claim
+                claim.status = "UNSUPPORTED"
+                v_code, _, sugg = cls._build_violation(claim, catalog)
+                msg = f"Claim '{claim.value}' matches only T4_UNVERIFIED inference, which cannot support a factual claim."
+                v = CodeViolation(
+                    code=v_code,
+                    file_path=claim.file_path,
+                    line_number=claim.line_number,
+                    message=msg,
+                    severity="error",
+                    suggestion="Verify claim against authoritative source code (T0) or specifications (T1).",
+                )
+                violations.append(v)
+                binding = ClaimEvidenceBinding(
+                    claim_id=claim.claim_id,
+                    kind=claim.kind,
+                    value=claim.value,
+                    status="UNSUPPORTED",
+                    evidence_ids=[],
+                    citation_valid=False,
+                    source_file=claim.file_path,
+                    line_number=claim.line_number,
+                    message=msg,
+                )
+                bindings.append(binding)
+                unsupported_bindings.append(binding)
+                findings.append(
+                    GroundingFinding(
+                        claim_type=claim.kind,
+                        claim_value=claim.value,
+                        status="UNSUPPORTED",
+                        evidence_id=None,
+                        message=msg,
                         source_file=claim.file_path,
                     )
                 )
@@ -209,12 +255,21 @@ class ClaimEvidenceBinder:
         if claimed_citations:
             valid_citations = 0
             for cid in claimed_citations:
-                # Must exist in catalog and match at least one claim
+                # Must exist in catalog, have >= T3 trust (not T4), and match at least one claim
                 in_catalog = False
+                ev_obj = None
                 if hasattr(catalog, "get_by_id"):
-                    in_catalog = bool(catalog.get_by_id(cid))
+                    ev_obj = catalog.get_by_id(cid)
+                    in_catalog = bool(ev_obj)
                 elif hasattr(catalog, "get_items"):
-                    in_catalog = any(item.evidence_id == cid for item in catalog.get_items())
+                    matches = [item for item in catalog.get_items() if getattr(item, "evidence_id", None) == cid]
+                    if matches:
+                        ev_obj = matches[0]
+                        in_catalog = True
+
+                ev_trust = getattr(ev_obj, "trust_level", None) if ev_obj else None
+                if ev_trust == TrustLevel.T4_UNVERIFIED or ev_trust == "T4_UNVERIFIED":
+                    in_catalog = False
 
                 if in_catalog and cid in used_evidence_set:
                     valid_citations += 1

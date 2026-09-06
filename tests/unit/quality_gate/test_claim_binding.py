@@ -152,3 +152,88 @@ def test_claim_binding_citation_accuracy():
     assert res.grounded_claim_rate == 1.0
     # 1 valid citation out of 2 claimed -> 50% citation accuracy
     assert res.citation_accuracy == 0.5
+
+
+@pytest.mark.unit
+def test_claim_binding_t4_unverified_strictly_rejected():
+    """T4_UNVERIFIED evidence record cannot support a factual claim and generates error violation."""
+    catalog = EvidenceCatalog2()
+    t4_ev = EvidenceRecord(
+        evidence_id="EV-T4-LOGIN",
+        kind="api_endpoint",
+        value="POST /api/v1/auth/login",
+        source_id="s_llm",
+        source_path="llm_inference.txt",
+        source_chunk_id="c_llm",
+        commit_sha="any_commit",
+        extractor="llm_inference",
+        trust_level=TrustLevel.T4_UNVERIFIED,
+    )
+    catalog.add_record(t4_ev)
+
+    claims = [
+        ClaimItem(
+            claim_id="C-T4-01",
+            kind="api_endpoint",
+            value="POST /api/v1/auth/login",
+            file_path="tests/test_auth.py",
+            line_number=10,
+        )
+    ]
+
+    res = ClaimEvidenceBinder.bind(claims=claims, catalog=catalog)
+    assert res.grounded_claim_rate == 0.0
+    assert len(res.unsupported_claims) == 1
+    assert res.bindings[0].status == "UNSUPPORTED"
+    assert res.bindings[0].citation_valid is False
+    assert res.has_blocking_violations is True
+    assert any("T4_UNVERIFIED" in v.message for v in res.violations)
+
+
+@pytest.mark.unit
+def test_claim_binding_t4_citation_rejected():
+    """Citation pointing to a T4_UNVERIFIED record is rejected, lowering citation accuracy."""
+    catalog = EvidenceCatalog2()
+    real_ev = EvidenceRecord(
+        evidence_id="EV-REAL-AUTH",
+        kind="api_endpoint",
+        value="POST /api/v1/auth/token",
+        source_id="s_real",
+        source_path="auth.py",
+        source_chunk_id="c_real",
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+    t4_ev = EvidenceRecord(
+        evidence_id="EV-T4-DOC",
+        kind="api_endpoint",
+        value="POST /api/v1/auth/token",
+        source_id="s_t4",
+        source_path="t4.txt",
+        source_chunk_id="c_t4",
+        extractor="llm_inference",
+        trust_level=TrustLevel.T4_UNVERIFIED,
+    )
+    catalog.add_record(real_ev)
+    catalog.add_record(t4_ev)
+
+    claims = [
+        ClaimItem(
+            claim_id="C-005",
+            kind="api_endpoint",
+            value="POST /api/v1/auth/token",
+            file_path="tests/test_token.py",
+        )
+    ]
+
+    # Claim points to T4 citation
+    res = ClaimEvidenceBinder.bind(
+        claims=claims,
+        catalog=catalog,
+        claimed_citations=["EV-T4-DOC"],
+    )
+
+    # The claim itself matches EV-REAL-AUTH (T0) so grounded_claim_rate is 1.0, but T4 citation is invalid
+    assert res.grounded_claim_rate == 1.0
+    assert res.citation_accuracy == 0.0
+

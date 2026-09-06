@@ -32,29 +32,69 @@ class EvidenceCatalogBuilder:
         if extracted_records:
             all_records.extend(extracted_records)
 
-        # 2. Convert retrieved chunks to evidence if they contain provenance
+        # 2. Convert retrieved chunks or evidence items from retrieval
         if retrieved_items:
             for item in retrieved_items:
-                meta = item.metadata or {}
-                source_id = meta.get("source_id") or f"SRC-{item.source}"
-                chunk_id = item.chunk_id
-                commit_sha = meta.get("commit_sha") or self.pinned_commit
+                # If item is an EvidenceRecord already
+                if isinstance(item, EvidenceRecord):
+                    all_records.append(item)
+                    continue
+
+                # If item is a dict with evidence_id/kind/value (from app_context.to_evidence_items())
+                if isinstance(item, dict) and "kind" in item and "value" in item and ("evidence_id" in item or "id" in item):
+                    ev_id = item.get("evidence_id") or item.get("id") or ""
+                    meta = item.get("metadata", {})
+                    all_records.append(
+                        EvidenceRecord(
+                            evidence_id=ev_id,
+                            kind=item.get("kind"),
+                            value=item.get("value"),
+                            source_id=meta.get("source_id", f"src_{item.get('source', 'unknown')}"),
+                            source_path=item.get("source", "unknown"),
+                            source_chunk_id=meta.get("chunk_id", f"chk_{ev_id}"),
+                            line_start=meta.get("line_start"),
+                            line_end=meta.get("line_end"),
+                            commit_sha=meta.get("commit_sha"),
+                            content_hash=meta.get("content_hash", ""),
+                            extractor=meta.get("extractor", "knowledge_extractor"),
+                            trust_level=TrustLevel.T1_STRONG,
+                            confidence=item.get("confidence", 1.0),
+                        )
+                    )
+                    continue
+
+                # If item is a RetrievalItem or dict representing a retrieved document chunk
+                if isinstance(item, dict):
+                    meta = item.get("metadata") or {}
+                    chunk_id = item.get("chunk_id") or item.get("id") or "chk_unknown"
+                    src = item.get("source") or meta.get("source") or meta.get("file_path") or "unknown"
+                    content = item.get("content") or ""
+                    match_rules = item.get("match_rules") or []
+                else:
+                    meta = getattr(item, "metadata", None) or {}
+                    chunk_id = getattr(item, "chunk_id", "chk_unknown")
+                    src = getattr(item, "source", "unknown") or meta.get("source") or "unknown"
+                    content = getattr(item, "content", "")
+                    match_rules = getattr(item, "match_rules", [])
+
+                source_id = meta.get("source_id") or f"src_{src}"
+                commit_sha = meta.get("commit_sha")
                 content_hash = meta.get("content_hash") or ""
                 doc_type = meta.get("type", "code")
 
                 # If retrieved item has exact match rules (e.g. symbol:Foo or api_key:GET /users)
-                for rule in item.match_rules:
+                for rule in match_rules:
                     if ":" in rule:
                         rule_type, rule_val = rule.split(":", 1)
                         kind = "target_symbol" if "symbol" in rule_type else (
                             "api_endpoint" if "api" in rule_type else "config"
                         )
                         ev = EvidenceRecord(
-                            evidence_id=f"EV-{kind}-{chunk_id[:12]}",
+                            evidence_id=f"evi_{kind}_{chunk_id[-8:] if len(chunk_id)>=8 else chunk_id}",
                             kind=kind,
                             value=rule_val,
                             source_id=source_id,
-                            source_path=item.source,
+                            source_path=src,
                             source_chunk_id=chunk_id,
                             line_start=meta.get("line_start"),
                             line_end=meta.get("line_end"),

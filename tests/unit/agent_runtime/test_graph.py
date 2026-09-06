@@ -13,11 +13,25 @@ async def test_graph_passes_and_records_trace(tmp_path: Path):
             "test_ok.py": "from calculator import compute\n\ndef test_ok():\n    res = compute(21)\n    assert res == 42\n",
         }
 
+    evidence = [
+        {
+            "evidence_id": "EV-CALC-COMPUTE",
+            "kind": "target_symbol",
+            "value": "calculator.compute",
+            "source": "calculator.py",
+            "source_id": "s1",
+            "source_path": "calculator.py",
+            "source_chunk_id": "c1",
+            "trust_level": "T0_AUTHORITATIVE",
+            "extractor": "ast_extractor",
+        }
+    ]
     workflow = AgenticTestWorkflow(generator=generator)
     result = await workflow.run({
         "requirement": "Generate a passing smoke test",
         "workspace": str(tmp_path),
         "target_entrypoint": "calculator.compute",
+        "evidence_catalog": evidence,
         "test_command": ["python", "-m", "pytest", "-q"],
         "framework": "pytest",
     })
@@ -27,8 +41,8 @@ async def test_graph_passes_and_records_trace(tmp_path: Path):
     assert result["generation_success"] is True
     assert result["execution_success"] is True
     assert result["repair_success"] is False
-    assert [event["node"] for event in result["trace"]] == [
-        "plan", "retrieve", "generate", "code_quality", "execute", "review", "persist"
+    assert [event["node"] for event in result["trace"] if "node" in event] == [
+        "plan", "grounding_plan", "retrieve", "evidence_build", "generate", "claim_bind", "code_quality", "execute", "review", "persist"
     ]
 
 
@@ -48,11 +62,25 @@ async def test_graph_repairs_after_failure(tmp_path: Path):
             "test_case.py": "from calculator import compute\n\ndef test_case():\n    res = compute(21)\n    assert res == 42\n",
         }
 
+    evidence = [
+        {
+            "evidence_id": "EV-CALC-COMPUTE",
+            "kind": "target_symbol",
+            "value": "calculator.compute",
+            "source": "calculator.py",
+            "source_id": "s1",
+            "source_path": "calculator.py",
+            "source_chunk_id": "c1",
+            "trust_level": "T0_AUTHORITATIVE",
+            "extractor": "ast_extractor",
+        }
+    ]
     workflow = AgenticTestWorkflow(generator=generator, repairer=repairer)
     result = await workflow.run({
         "requirement": "Generate and validate a smoke test",
         "workspace": str(tmp_path),
         "target_entrypoint": "calculator.compute",
+        "evidence_catalog": evidence,
         "test_command": ["python", "-m", "pytest", "-q"],
         "framework": "pytest",
         "max_repair_rounds": 2,

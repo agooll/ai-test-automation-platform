@@ -3,10 +3,25 @@ import logging
 import os
 from pathlib import Path
 
-import aiofiles  # For async file operations
-import docx
-import fitz  # PyMuPDF
-import openpyxl
+try:
+    import aiofiles
+except ImportError:
+    aiofiles = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
 
 logger = logging.getLogger(__name__)
 

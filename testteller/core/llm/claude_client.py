@@ -6,7 +6,10 @@ import logging
 import os
 from typing import List
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 from .base_client import BaseLLMClient
 from ..constants import (
@@ -26,6 +29,8 @@ class ClaudeClient(BaseLLMClient):
     def __init__(self):
         """Initialize the Claude client with API key from settings or environment."""
         super().__init__("claude")
+        if anthropic is None:
+            raise ImportError("anthropic package is required for ClaudeClient. Install it with pip install anthropic.")
         self.client = anthropic.Anthropic(api_key=self.api_key)
         self.async_client = anthropic.AsyncAnthropic(api_key=self.api_key)
 

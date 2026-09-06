@@ -73,6 +73,7 @@ chroma_data_*/
 temp_cloned_repos/
 *.tmp
 *.log
+tmp/
 
 # IDE files
 .vscode/

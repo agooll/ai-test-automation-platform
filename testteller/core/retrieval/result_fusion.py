@@ -1,5 +1,8 @@
 """Rank fusion and deduplication for local and vector retrieval results."""
 
+from __future__ import annotations
+
+from typing import Optional
 from .models import RetrievalItem
 
 

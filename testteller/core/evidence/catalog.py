@@ -39,9 +39,21 @@ class EvidenceCatalog2:
         if record.kind not in self._records_by_kind:
             self._records_by_kind[record.kind] = []
         self._records_by_kind[record.kind].append(record)
+        # Sort by trust level rank (lower rank is more authoritative)
+        self._records_by_kind[record.kind].sort(
+            key=lambda r: getattr(r.trust_level, "rank", 99) if hasattr(r, "trust_level") else 99
+        )
 
         norm_val = normalize_evidence_value(record.kind, record.value)
-        self._exact_index[(record.kind, norm_val)] = record
+        key = (record.kind, norm_val)
+        existing = self._exact_index.get(key)
+        if existing is None:
+            self._exact_index[key] = record
+        else:
+            existing_rank = getattr(existing.trust_level, "rank", 99) if hasattr(existing, "trust_level") else 99
+            record_rank = getattr(record.trust_level, "rank", 99) if hasattr(record, "trust_level") else 99
+            if record_rank < existing_rank:
+                self._exact_index[key] = record
 
     def add_records(self, records: Iterable[EvidenceRecord]) -> None:
         for r in records:

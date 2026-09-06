@@ -77,10 +77,23 @@ def test_cache_put():
         tool_registry=tools,
     )
 
+    evidence = [
+        {
+            "evidence_id": "EV-CACHE-LRU",
+            "kind": "target_symbol",
+            "value": "cachetools.LRUCache",
+            "source": "cachetools",
+            "source_id": "s1",
+            "source_path": "cachetools.py",
+            "source_chunk_id": "c1",
+            "trust_level": "T0_AUTHORITATIVE",
+        }
+    ]
     result = await workflow.run({
         "requirement": "Test LRU cache",
         "workspace": str(tmp_path),
         "target_entrypoint": "cachetools.LRUCache",
+        "evidence_catalog": evidence,
     })
 
     assert result["code_quality_result"]["status"] == "PASS"
@@ -533,10 +546,23 @@ def test_cache_op():
         tool_registry=tools,
     )
 
+    evidence = [
+        {
+            "evidence_id": "EV-CACHE-LRU",
+            "kind": "target_symbol",
+            "value": "cachetools.LRUCache",
+            "source": "cachetools",
+            "source_id": "s1",
+            "source_path": "cachetools.py",
+            "source_chunk_id": "c1",
+            "trust_level": "T0_AUTHORITATIVE",
+        }
+    ]
     result = await workflow.run({
         "requirement": "Verify LRU cache basic key storage",
         "workspace": str(tmp_path),
         "target_entrypoint": "cachetools.LRUCache",
+        "evidence_catalog": evidence,
     })
 
     assert result["execution_result"]["passed"] is True
