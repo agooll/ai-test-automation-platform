@@ -75,7 +75,29 @@ class AutomationCodeQualityGate:
             )
 
         # 0. Build or enrich EvidenceCatalog
-        catalog = evidence_catalog or EvidenceCatalog()
+        if isinstance(evidence_catalog, EvidenceCatalog):
+            catalog = evidence_catalog
+        else:
+            catalog = EvidenceCatalog()
+            if isinstance(evidence_catalog, (list, tuple)):
+                for it in evidence_catalog:
+                    if isinstance(it, EvidenceItem):
+                        catalog.add_item(it)
+                    elif isinstance(it, dict) and "evidence_id" in it and "kind" in it and "value" in it:
+                        try:
+                            catalog.add_item(
+                                EvidenceItem(
+                                    evidence_id=str(it["evidence_id"]),
+                                    kind=it["kind"],
+                                    value=str(it["value"]),
+                                    source=str(it.get("source", "catalog")),
+                                    source_chunk_id=it.get("source_chunk_id"),
+                                    confidence=float(it.get("confidence", 1.0)),
+                                )
+                            )
+                        except Exception:
+                            pass
+
         if target_entrypoint:
             entrypoint_symbols = RepoSymbolExtractor.extract_from_entrypoint(
                 target_entrypoint, repo_root=repo_path
@@ -89,7 +111,16 @@ class AutomationCodeQualityGate:
                 elif isinstance(ctx_item, dict):
                     if "evidence_id" in ctx_item and "kind" in ctx_item and "value" in ctx_item:
                         try:
-                            catalog.add_item(EvidenceItem(**ctx_item))
+                            catalog.add_item(
+                                EvidenceItem(
+                                    evidence_id=str(ctx_item["evidence_id"]),
+                                    kind=ctx_item["kind"],
+                                    value=str(ctx_item["value"]),
+                                    source=str(ctx_item.get("source", "catalog")),
+                                    source_chunk_id=ctx_item.get("source_chunk_id"),
+                                    confidence=float(ctx_item.get("confidence", 1.0)),
+                                )
+                            )
                         except Exception:
                             pass
 
@@ -186,12 +217,26 @@ class AutomationCodeQualityGate:
             repair_feedback.append(item_msg)
 
         has_errors = any(v.severity == "error" for v in hard_violations)
-        status = "REJECTED" if has_errors else "PASS"
-        allow_execution = not any(
-            v.code in (CodeViolationCode.CODE_PARSE_ERROR, CodeViolationCode.NO_TEST_DISCOVERED)
-            for v in hard_violations
+        has_unknown_business_claims = any(
+            f.status == "UNKNOWN" and f.claim_type in ("api_endpoint", "target_symbol", "ui_selector")
+            for f in grounding_findings
         )
-        allow_final_pass = not has_errors
+
+        if has_errors:
+            status = "REJECTED"
+            allow_execution = False
+            allow_final_pass = False
+        elif has_unknown_business_claims:
+            status = "NEEDS_REVIEW"
+            allow_execution = True
+            allow_final_pass = False
+            repair_feedback.append(
+                "- [NEEDS_REVIEW] Test code contains unverified business claims (API/UI/symbols) that lack authoritative project evidence."
+            )
+        else:
+            status = "PASS"
+            allow_execution = True
+            allow_final_pass = True
 
         logger.info(
             "AutomationCodeQualityGate verdict: status=%s, violations=%d, total_tests=%d, vacuity_score=%.2f, grounding_score=%.2f",

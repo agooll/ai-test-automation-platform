@@ -38,6 +38,28 @@ class ExistingRAGAdapter:
     async def retrieve(self, state: AgentState) -> list[dict[str, Any]]:
         query = state.get("requirement") or " ".join(case.objective for case in self.test_cases)
         vs = self.generator.knowledge_extractor.vector_store
+        results: list[dict[str, Any]] = []
+
+        # 1. Extract verified application context and canonical evidence items
+        try:
+            app_context = await asyncio.to_thread(
+                self.generator.knowledge_extractor.extract_app_context, self.test_cases
+            )
+            for ev in app_context.to_evidence_items():
+                results.append({
+                    "id": ev.evidence_id,
+                    "evidence_id": ev.evidence_id,
+                    "kind": ev.kind,
+                    "value": ev.value,
+                    "source": ev.source,
+                    "confidence": ev.confidence,
+                    "content": f"Verified {ev.kind}: {ev.value} (Source: {ev.source})",
+                    "metadata": {"source": ev.source, "type": "evidence", "kind": ev.kind},
+                })
+        except Exception:
+            pass
+
+        # 2. Query similar raw documents from vector store
         try:
             if hasattr(vs, "query_similar"):
                 raw = await asyncio.to_thread(vs.query_similar, query, n_results=self.generator.num_context_docs)
@@ -45,16 +67,15 @@ class ExistingRAGAdapter:
                 metas = raw.get("metadatas", [[]])[0] if raw.get("metadatas") else []
                 dists = raw.get("distances", [[]])[0] if raw.get("distances") else []
                 ids = raw.get("ids", [[]])[0] if raw.get("ids") else []
-                return [
-                    {
+                for i in range(len(docs)):
+                    results.append({
                         "id": ids[i] if i < len(ids) else f"doc_{i}",
                         "content": docs[i] if i < len(docs) else "",
                         "metadata": metas[i] if i < len(metas) and metas[i] else {},
                         "distance": dists[i] if i < len(dists) else 0.0,
                         "source": (metas[i].get("source") or metas[i].get("file_path") or "") if i < len(metas) and metas[i] else "",
-                    }
-                    for i in range(len(docs))
-                ]
+                    })
+                return results
             elif hasattr(vs, "query_collection"):
                 res = await vs.query_collection(query, n_results=self.generator.num_context_docs)
                 return [

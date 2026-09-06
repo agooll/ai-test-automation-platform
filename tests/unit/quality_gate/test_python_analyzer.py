@@ -132,3 +132,58 @@ def test_all_mocked():
     analyses = analyze_test_module(code, target_entrypoint="MyClient")
     func = analyses[0]
     assert func.is_fully_mocked is True
+
+
+def test_sut_tracking_rejects_time_and_stdlib_bypass():
+    code = """
+import time
+import random
+
+def test_time_bypass():
+    now = time.time()
+    val = random.random()
+    assert now > 0
+    assert val >= 0
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    assert len(analyses) == 1
+    func = analyses[0]
+    assert func.has_real_sut_interaction is False
+    assert len(func.sut_calls) == 0
+    assert len(func.sut_derived_vars) == 0
+    assert not any(a.has_sut_dependency for a in func.assertions)
+
+
+def test_pytest_raises_without_sut_not_marked_sut():
+    code = """
+import pytest
+
+def test_manufactured_raise():
+    with pytest.raises(ValueError):
+        raise ValueError("manufactured")
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    assert len(analyses) == 1
+    func = analyses[0]
+    assert func.has_pytest_raises is True
+    assert func.has_sut_inside_raises is False
+    assert func.has_real_sut_interaction is False
+
+
+def test_pytest_raises_with_sut_marked_sut():
+    code = """
+import pytest
+from cachetools import LRUCache
+
+def test_real_sut_raise():
+    cache = LRUCache(maxsize=2)
+    with pytest.raises(KeyError):
+        _ = cache["missing"]
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    assert len(analyses) == 1
+    func = analyses[0]
+    assert func.has_pytest_raises is True
+    assert func.has_sut_inside_raises is True
+    assert func.has_real_sut_interaction is True
+

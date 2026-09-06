@@ -87,3 +87,48 @@ def test_skipped():
     violations = validate_test_functions(analyses, "test_skipped.py")
     codes = [v.code for v in violations]
     assert CodeViolationCode.UNCONDITIONAL_SKIP in codes
+
+
+def test_pytest_raises_without_sut_fails_rules():
+    code = """
+import pytest
+
+def test_manufactured():
+    with pytest.raises(ValueError):
+        raise ValueError("fake")
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    violations = validate_test_functions(analyses, "test_raises.py")
+    codes = [v.code for v in violations]
+    assert CodeViolationCode.NO_SUT_INTERACTION in codes
+    assert CodeViolationCode.NO_SUT_DEPENDENT_ASSERTION in codes
+
+
+def test_pytest_raises_with_sut_passes_rules():
+    code = """
+import pytest
+from cachetools import LRUCache
+
+def test_genuine():
+    c = LRUCache(maxsize=1)
+    with pytest.raises(KeyError):
+        _ = c['missing']
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    violations = validate_test_functions(analyses, "test_raises.py")
+    assert len(violations) == 0
+
+
+def test_stdlib_time_bypass_fails_rules():
+    code = """
+import time
+
+def test_time_only():
+    t = time.time()
+    assert t > 0
+"""
+    analyses = analyze_test_module(code, target_entrypoint="cachetools.LRUCache")
+    violations = validate_test_functions(analyses, "test_time.py")
+    codes = [v.code for v in violations]
+    assert CodeViolationCode.NO_SUT_INTERACTION in codes
+

@@ -149,8 +149,13 @@ def validate_test_functions(
             )
 
         # 6. SUT interaction check
-        has_sut_call = len(func.sut_calls) > 0
-        if not has_sut_call and not func.has_pytest_raises:
+        has_sut_interaction = (
+            func.has_real_sut_interaction
+            or len(func.sut_calls) > 0
+            or len(func.sut_mutations) > 0
+            or func.has_sut_inside_raises
+        )
+        if not has_sut_interaction:
             violations.append(
                 CodeViolation(
                     code=CodeViolationCode.NO_SUT_INTERACTION,
@@ -192,6 +197,24 @@ def validate_test_functions(
             )
         else:
             has_valid_dependent_assert = False
+
+            # If pytest.raises is present, it is valid ONLY IF a real SUT operation was invoked inside it
+            if func.has_pytest_raises:
+                if func.has_sut_inside_raises:
+                    has_valid_dependent_assert = True
+                else:
+                    violations.append(
+                        CodeViolation(
+                            code=CodeViolationCode.NO_SUT_DEPENDENT_ASSERTION,
+                            file_path=file_path,
+                            function_name=func.name,
+                            line_number=func.line_number,
+                            message=f"Test '{func.name}' uses 'pytest.raises' without executing any SUT operation inside the block.",
+                            severity="error",
+                            suggestion="Place the SUT invocation that is expected to raise an exception inside the 'pytest.raises' context block.",
+                        )
+                    )
+
             for assert_info in func.assertions:
                 if assert_info.is_tautology:
                     violations.append(
@@ -235,10 +258,15 @@ def validate_test_functions(
                 elif assert_info.has_sut_dependency:
                     has_valid_dependent_assert = True
 
-            # If none of the assertions depended on SUT and no pytest.raises
-            if not has_valid_dependent_assert and not func.has_pytest_raises:
-                # Only add if not already flagged as NO_SUT_INTERACTION
-                if has_sut_call:
+            # If none of the assertions depended on SUT
+            if not has_valid_dependent_assert:
+                # Only add if not already flagged as NO_SUT_INTERACTION or NO_SUT_DEPENDENT_ASSERTION
+                already_flagged = any(
+                    v.code == CodeViolationCode.NO_SUT_DEPENDENT_ASSERTION
+                    for v in violations
+                    if v.function_name == func.name
+                )
+                if has_sut_interaction and not already_flagged:
                     violations.append(
                         CodeViolation(
                             code=CodeViolationCode.NO_SUT_DEPENDENT_ASSERTION,

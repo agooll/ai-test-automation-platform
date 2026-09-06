@@ -1,10 +1,31 @@
-"""Python AST Analyzer for test functions and assertion dependency tracking."""
+"""Python AST Analyzer for test functions, fail-closed SUT tracking, and assertion dependencies."""
 
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
+
+
+# Standard library modules and utilities that can NEVER be considered System Under Test (SUT)
+STDLIB_AND_UTILITY_MODULES: Set[str] = {
+    "time", "datetime", "random", "math", "os", "sys", "re", "json", "uuid",
+    "pathlib", "shutil", "tempfile", "io", "copy", "collections", "itertools",
+    "functools", "logging", "typing", "hashlib", "base64", "urllib", "http",
+    "string", "calendar", "glob", "inspect", "operator", "sqlite3", "pickle",
+    "csv", "xml", "subprocess", "threading", "multiprocessing", "asyncio",
+    "concurrent", "queue", "socket", "ssl", "traceback", "warnings", "weakref",
+    "gc", "contextlib", "dis", "platform", "signal", "unittest", "pytest",
+}
+
+BUILTIN_AND_FRAMEWORK_FUNCTIONS: Set[str] = {
+    "pytest", "unittest", "mock", "MagicMock", "Mock", "patch", "AsyncMock",
+    "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
+    "set", "tuple", "isinstance", "issubclass", "open", "type", "id",
+    "dir", "getattr", "setattr", "hasattr", "repr", "enumerate", "zip",
+    "min", "max", "sum", "abs", "round", "all", "any", "sorted", "reversed",
+    "sleep", "now", "time", "uuid4", "Path", "dumps", "loads", "search", "match",
+}
 
 
 @dataclass
@@ -34,8 +55,11 @@ class TestFunctionAnalysis:
     docstring: Optional[str] = None
     sut_calls: List[SUTCallInfo] = field(default_factory=list)
     sut_derived_vars: Set[str] = field(default_factory=set)
+    sut_mutations: List[int] = field(default_factory=list)
+    has_real_sut_interaction: bool = False
     assertions: List[AssertionInfo] = field(default_factory=list)
     has_pytest_raises: bool = False
+    has_sut_inside_raises: bool = False
     swallowed_exceptions: List[int] = field(default_factory=list)
     unreachable_assertions: List[int] = field(default_factory=list)
     is_unconditionally_skipped: bool = False
@@ -53,27 +77,30 @@ def _get_target_symbol_leaf(target_entrypoint: Optional[str]) -> Optional[str]:
     return cleaned.split(".")[-1]
 
 
-def _is_framework_or_builtin_name(name: str) -> bool:
-    """Check if a symbol name is a common test framework, mock, or builtin."""
-    builtins_and_frameworks = {
-        "pytest", "unittest", "mock", "MagicMock", "Mock", "patch", "AsyncMock",
-        "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
-        "set", "tuple", "isinstance", "issubclass", "open", "type", "id",
-        "dir", "getattr", "setattr", "hasattr", "repr", "enumerate", "zip",
-    }
-    return name in builtins_and_frameworks
+def _is_disallowed_as_sut(name: str) -> bool:
+    """Check if a symbol or call belongs to stdlib, utilities, test framework, or builtins."""
+    cleaned = name.strip()
+    if cleaned in BUILTIN_AND_FRAMEWORK_FUNCTIONS:
+        return True
+    root = cleaned.split(".")[0]
+    if root in STDLIB_AND_UTILITY_MODULES or root in BUILTIN_AND_FRAMEWORK_FUNCTIONS:
+        return True
+    return False
 
 
 class FunctionAstVisitor(ast.NodeVisitor):
-    """Detailed AST analyzer for an individual test function."""
+    """Detailed AST analyzer for an individual test function with fail-closed SUT tracking."""
 
     def __init__(self, func_node: ast.FunctionDef | ast.AsyncFunctionDef, target_entrypoint: Optional[str] = None):
         self.func_node = func_node
+        self.target_entrypoint = target_entrypoint
         self.target_leaf = _get_target_symbol_leaf(target_entrypoint)
+        self.target_full = target_entrypoint.strip() if target_entrypoint else None
         self.analysis = TestFunctionAnalysis(
             name=func_node.name,
             line_number=func_node.lineno,
         )
+        self._sut_instances: Set[str] = set()
         self._sut_vars: Set[str] = set()
         self._mock_vars: Set[str] = set()
 
@@ -124,6 +151,9 @@ class FunctionAstVisitor(ast.NodeVisitor):
         if self.analysis.sut_calls and all(c.is_mock for c in self.analysis.sut_calls):
             self.analysis.is_fully_mocked = True
 
+        if self.analysis.sut_calls or self.analysis.sut_mutations or self.analysis.has_sut_inside_raises:
+            self.analysis.has_real_sut_interaction = True
+
         self.analysis.sut_derived_vars = set(self._sut_vars)
         return self.analysis
 
@@ -140,12 +170,12 @@ class FunctionAstVisitor(ast.NodeVisitor):
         # 4. Try block (check for swallowed exceptions)
         elif isinstance(stmt, ast.Try):
             self._handle_try(stmt)
-        # 5. Standalone call statement (e.g. cache['a'] = 1, or client.get(...))
+        # 5. Standalone call statement (e.g. cache.clear(), or client.get(...))
         elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            self._handle_call_expr(stmt.value)
-        # 6. Augmented assign or subscript assign: cache['a'] = 1
-        elif isinstance(stmt, ast.Assign):
-            pass
+            self._handle_call_expr(stmt.value, lineno=stmt.lineno)
+        # 6. Deletion: del cache['a']
+        elif isinstance(stmt, ast.Delete):
+            self._handle_delete(stmt)
 
         # Recurse into compound statements
         if isinstance(stmt, (ast.For, ast.While, ast.If)):
@@ -154,15 +184,80 @@ class FunctionAstVisitor(ast.NodeVisitor):
             for child in getattr(stmt, "orelse", []):
                 self._process_statement(child)
 
+    def _is_sut_call(self, call: ast.Call) -> tuple[bool, bool, str]:
+        """
+        Evaluate whether a call is an actual SUT operation.
+        Returns: (is_sut, is_mock, func_name)
+        """
+        func_name = self._get_call_name(call.func)
+
+        # 1. Check if mock
+        receiver_is_mock = False
+        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+            if call.func.value.id in self._mock_vars:
+                receiver_is_mock = True
+
+        is_mock = (
+            receiver_is_mock
+            or func_name in ("Mock", "MagicMock", "patch", "AsyncMock")
+            or "mock" in func_name.lower()
+        )
+        if is_mock:
+            return False, True, func_name
+
+        # 2. Check if disallowed stdlib or builtin (e.g. time.time(), random.random())
+        if _is_disallowed_as_sut(func_name):
+            # Builtins/stdlib are NEVER SUT by themselves
+            return False, False, func_name
+
+        # 3. If target_entrypoint is provided: FAIL-CLOSED
+        if self.target_leaf:
+            # Case 3a: Direct call/instantiation of target symbol (e.g. LRUCache(10))
+            if (
+                func_name == self.target_leaf
+                or func_name == self.target_full
+                or func_name.endswith(f".{self.target_leaf}")
+            ):
+                return True, False, func_name
+
+            # Case 3b: Method call on an SUT instance (e.g. cache.get(...), cache.popitem())
+            if isinstance(call.func, ast.Attribute):
+                recv = call.func.value
+                if isinstance(recv, ast.Name) and recv.id in self._sut_instances:
+                    return True, False, func_name
+                elif isinstance(recv, ast.Attribute) and getattr(recv, "attr", "") in self._sut_instances:
+                    return True, False, func_name
+
+            # Case 3c: SUT instance passed as primary argument to an inspected function
+            if any(name in self._sut_instances for name in self._extract_names(call)):
+                return True, False, func_name
+
+            # FAIL-CLOSED: Any other function call (e.g. time.time(), unrelated helper) is NOT SUT!
+            return False, False, func_name
+
+        # 4. If target_entrypoint is NOT provided (fallback mode):
+        # Allow user/project functions and SUT instance method calls
+        if isinstance(call.func, ast.Attribute):
+            recv = call.func.value
+            if isinstance(recv, ast.Name) and recv.id in self._sut_instances:
+                return True, False, func_name
+
+        return True, False, func_name
+
     def _handle_assignment(self, stmt: ast.Assign | ast.AnnAssign) -> None:
         targets: List[str] = []
+        is_subscript_mutation = False
+
         if isinstance(stmt, ast.Assign):
             for t in stmt.targets:
                 if isinstance(t, ast.Name):
                     targets.append(t.id)
                 elif isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
-                    # e.g. cache['a'] = 1 -> mutation on SUT object
-                    if t.value.id in self._sut_vars:
+                    # e.g. cache['a'] = 1 -> SUT mutation
+                    if t.value.id in self._sut_instances:
+                        is_subscript_mutation = True
+                        self.analysis.sut_mutations.append(stmt.lineno)
+                        self.analysis.has_real_sut_interaction = True
                         self._sut_vars.add(t.value.id)
             val = stmt.value
         else:
@@ -175,37 +270,39 @@ class FunctionAstVisitor(ast.NodeVisitor):
 
         # Check what is being assigned
         if isinstance(val, ast.Call):
-            func_name = self._get_call_name(val.func)
-            receiver_is_mock = False
-            if isinstance(val.func, ast.Attribute) and isinstance(val.func.value, ast.Name):
-                if val.func.value.id in self._mock_vars:
-                    receiver_is_mock = True
-
-            is_mock = receiver_is_mock or func_name in ("Mock", "MagicMock", "patch") or "mock" in func_name.lower()
-
-            # Is it an SUT call?
-            is_sut = False
-            if not is_mock:
-                if self.target_leaf and (func_name == self.target_leaf or self.target_leaf in func_name):
-                    is_sut = True
-                elif not _is_framework_or_builtin_name(func_name):
-                    is_sut = True
-                elif any(arg_name in self._sut_vars for arg_name in self._extract_names(val)):
-                    is_sut = True
-
+            is_sut, is_mock, func_name = self._is_sut_call(val)
             target_repr = targets[0] if targets else None
-            self.analysis.sut_calls.append(
-                SUTCallInfo(target_name=func_name, assigned_to=target_repr, line_number=stmt.lineno, is_mock=is_mock)
-            )
 
             if is_mock:
                 for t in targets:
                     self._mock_vars.add(t)
+                self.analysis.sut_calls.append(
+                    SUTCallInfo(target_name=func_name, assigned_to=target_repr, line_number=stmt.lineno, is_mock=True)
+                )
+
             elif is_sut:
+                for t in targets:
+                    # If this is constructing or creating the SUT:
+                    if self.target_leaf and (func_name == self.target_leaf or func_name.endswith(f".{self.target_leaf}")):
+                        self._sut_instances.add(t)
+                    elif not self.target_leaf:
+                        # Fallback mode: first non-stdlib constructor/call creates an SUT instance
+                        self._sut_instances.add(t)
+
+                    self._sut_vars.add(t)
+
+                self.analysis.sut_calls.append(
+                    SUTCallInfo(target_name=func_name, assigned_to=target_repr, line_number=stmt.lineno, is_mock=False)
+                )
+                self.analysis.has_real_sut_interaction = True
+
+        elif isinstance(val, ast.Subscript) and isinstance(val.value, ast.Name):
+            # e.g. item = cache['a']
+            if val.value.id in self._sut_instances:
+                self.analysis.has_real_sut_interaction = True
                 for t in targets:
                     self._sut_vars.add(t)
 
-        # Derivation from another variable: e.g. status = response.status_code or data = cache['a']
         else:
             referenced = self._extract_names(val)
             if any(name in self._mock_vars for name in referenced):
@@ -215,29 +312,24 @@ class FunctionAstVisitor(ast.NodeVisitor):
                 for t in targets:
                     self._sut_vars.add(t)
 
-    def _handle_call_expr(self, call: ast.Call) -> None:
-        func_name = self._get_call_name(call.func)
-        receiver_is_mock = False
-        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-            if call.func.value.id in self._mock_vars:
-                receiver_is_mock = True
+    def _handle_call_expr(self, call: ast.Call, lineno: int) -> None:
+        is_sut, is_mock, func_name = self._is_sut_call(call)
+        if is_sut:
+            self.analysis.sut_calls.append(
+                SUTCallInfo(target_name=func_name, assigned_to=None, line_number=lineno, is_mock=False)
+            )
+            self.analysis.has_real_sut_interaction = True
+        elif is_mock:
+            self.analysis.sut_calls.append(
+                SUTCallInfo(target_name=func_name, assigned_to=None, line_number=lineno, is_mock=True)
+            )
 
-        is_mock = receiver_is_mock or func_name in ("Mock", "MagicMock", "patch") or "mock" in func_name.lower()
-        is_sut = False
-
-        if not is_mock:
-            if self.target_leaf and (func_name == self.target_leaf or self.target_leaf in func_name):
-                is_sut = True
-            elif isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-                base_var = call.func.value.id
-                if base_var in self._sut_vars:
-                    is_sut = True
-            elif not _is_framework_or_builtin_name(func_name):
-                is_sut = True
-
-        self.analysis.sut_calls.append(
-            SUTCallInfo(target_name=func_name, assigned_to=None, line_number=call.lineno, is_mock=is_mock)
-        )
+    def _handle_delete(self, stmt: ast.Delete) -> None:
+        for t in stmt.targets:
+            if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                if t.value.id in self._sut_instances:
+                    self.analysis.sut_mutations.append(stmt.lineno)
+                    self.analysis.has_real_sut_interaction = True
 
     def _handle_assert(self, stmt: ast.Assert) -> None:
         raw_code = ast.unparse(stmt) if hasattr(ast, "unparse") else "assert"
@@ -271,14 +363,45 @@ class FunctionAstVisitor(ast.NodeVisitor):
         )
 
     def _handle_with(self, stmt: ast.With | ast.AsyncWith) -> None:
+        is_raises_block = False
         for item in stmt.items:
             if isinstance(item.context_expr, ast.Call):
                 name = self._get_call_name(item.context_expr.func)
                 if "raises" in name or "warns" in name:
+                    is_raises_block = True
                     self.analysis.has_pytest_raises = True
-                    # If target is inside the with body, consider it SUT interaction
-                    for body_stmt in stmt.body:
-                        self._process_statement(body_stmt)
+
+        # Process statements inside with block
+        for body_stmt in stmt.body:
+            if is_raises_block:
+                if self._statement_interacts_with_sut(body_stmt):
+                    self.analysis.has_sut_inside_raises = True
+                    self.analysis.has_real_sut_interaction = True
+
+            self._process_statement(body_stmt)
+
+    def _statement_interacts_with_sut(self, stmt: ast.stmt) -> bool:
+        """Check if a statement directly triggers an SUT operation inside a raises block."""
+        if isinstance(stmt, ast.Expr):
+            if isinstance(stmt.value, ast.Call):
+                is_sut, _, _ = self._is_sut_call(stmt.value)
+                return is_sut
+            elif isinstance(stmt.value, ast.Subscript) and isinstance(stmt.value.value, ast.Name):
+                # e.g. cache["missing"]
+                return stmt.value.value.id in self._sut_instances
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            if isinstance(stmt.value, ast.Call):
+                is_sut, _, _ = self._is_sut_call(stmt.value)
+                return is_sut
+            elif isinstance(stmt.value, ast.Subscript) and isinstance(stmt.value.value, ast.Name):
+                return stmt.value.value.id in self._sut_instances
+        elif isinstance(stmt, ast.Delete):
+            for t in stmt.targets:
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                    return t.value.id in self._sut_instances
+
+        # A bare raise statement (e.g. raise ValueError("fake")) is NEVER SUT interaction
+        return False
 
     def _handle_try(self, stmt: ast.Try) -> None:
         for handler in stmt.handlers:

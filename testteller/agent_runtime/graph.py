@@ -184,7 +184,23 @@ class AgenticTestWorkflow:
 
     async def _retrieve_node(self, state: AgentState) -> AgentState:
         context = await _maybe_call(self.retriever, state)
-        return self._record(state, "retrieve", {"retrieved_context": context})
+        evidence_items: list[dict[str, Any]] = []
+        if isinstance(context, list):
+            for item in context:
+                if isinstance(item, dict) and "evidence_id" in item and "kind" in item and "value" in item:
+                    evidence_items.append(item)
+                elif hasattr(item, "evidence_id") and hasattr(item, "kind") and hasattr(item, "value"):
+                    evidence_items.append({
+                        "evidence_id": getattr(item, "evidence_id"),
+                        "kind": getattr(item, "kind"),
+                        "value": getattr(item, "value"),
+                        "source": getattr(item, "source", "catalog"),
+                        "confidence": getattr(item, "confidence", 1.0),
+                    })
+        update: AgentState = {"retrieved_context": context}
+        if evidence_items:
+            update["grounding_catalog"] = evidence_items
+        return self._record(state, "retrieve", update)
 
     async def _generate_node(self, state: AgentState) -> AgentState:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
