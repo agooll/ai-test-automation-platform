@@ -1,0 +1,238 @@
+"""LangGraph nodes for Stage 5 RAG Grounding, Evidence Building, and Claim Binding."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List
+from pathlib import Path
+
+from testteller.core.evidence.catalog import EvidenceCatalog2
+from testteller.core.evidence.catalog_builder import EvidenceCatalogBuilder
+from testteller.core.evidence.extractors import (
+    OpenAPIEvidenceExtractor,
+    PythonASTEvidenceExtractor,
+)
+from testteller.core.evidence.models import EvidenceRecord
+from testteller.core.retrieval.query_planner import GroundingQueryPlanner
+from testteller.quality_gate.claim_binding import ClaimEvidenceBinder
+from testteller.quality_gate.grounding import CodeClaimExtractor
+from testteller.automator_agent.repair_planner import RepairGroundingPlanner
+from .state import AgentState
+
+logger = logging.getLogger(__name__)
+
+
+async def grounding_plan_node(state: AgentState) -> Dict[str, Any]:
+    """Analyze requirement and formulate structured GroundingQueryPlan."""
+    req = state.get("requirement", "")
+    target_ep = state.get("target_entrypoint")
+    planner = GroundingQueryPlanner()
+    plan = planner.plan(requirement_text=req, target_entrypoint=target_ep)
+
+    event_payload = {
+        "type": "GROUNDING_PLAN_COMPLETED",
+        "plan_id": plan.plan_id,
+        "query_count": len(plan.queries),
+        "kinds": list(dict.fromkeys(q.kind for q in plan.queries)),
+    }
+    logger.info("Grounding plan formulated: %s (%d sub-queries)", plan.plan_id, len(plan.queries))
+
+    plan_dict = {
+        "plan_id": plan.plan_id,
+        "queries": [
+            {
+                "query_id": q.query_id,
+                "kind": q.kind,
+                "text": q.text,
+                "required": q.required,
+                "exact_terms": q.exact_terms,
+            }
+            for q in plan.queries
+        ],
+        "requirement_text": req,
+        "target_entrypoint": target_ep,
+    }
+    return {
+        "grounding_query_plan": plan_dict,
+        "trace": state.get("trace", []) + [event_payload],
+    }
+
+
+async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
+    """Extract deterministic facts, aggregate with retrieved context, and resolve conflicts."""
+    workspace = state.get("workspace", "")
+    target_ep = state.get("target_entrypoint")
+    pinned_commit = state.get("pinned_commit")
+    extracted: List[EvidenceRecord] = []
+
+    # 1. AST extraction if workspace exists
+    if workspace and Path(workspace).exists():
+        ast_extractor = PythonASTEvidenceExtractor()
+        ws_path = Path(workspace)
+        # Scan top-level py files or target entrypoint
+        for py_file in ws_path.glob("**/*.py"):
+            if any(part.startswith((".", "venv", "build", "tests")) for part in py_file.parts):
+                continue
+            try:
+                extracted.extend(
+                    ast_extractor.extract_from_file(
+                        py_file,
+                        commit_sha=pinned_commit,
+                    )
+                )
+            except Exception:
+                pass
+
+        # Scan for OpenAPI JSON/YAML specs
+        openapi_extractor = OpenAPIEvidenceExtractor()
+        for spec_file in list(ws_path.glob("**/openapi.yaml")) + list(ws_path.glob("**/openapi.json")):
+            try:
+                extracted.extend(
+                    openapi_extractor.extract_from_file(
+                        spec_file,
+                        commit_sha=pinned_commit,
+                    )
+                )
+            except Exception:
+                pass
+
+    # 2. Build EvidenceBundle
+    builder = EvidenceCatalogBuilder(pinned_commit=pinned_commit)
+    bundle = builder.build_bundle(
+        extracted_records=extracted,
+        query_plan=state.get("grounding_query_plan"),
+    )
+
+    trace = list(state.get("trace", []))
+    trace.append({
+        "type": "EVIDENCE_CATALOG_BUILT",
+        "evidence_count": len(bundle.evidence),
+        "coverage_score": bundle.coverage_score,
+        "conflict_count": len(bundle.conflicts),
+        "provenance_complete": bundle.provenance_complete,
+    })
+
+    if bundle.conflicts:
+        trace.append({
+            "type": "EVIDENCE_CONFLICT_DETECTED",
+            "conflicts": [
+                {
+                    "conflict_id": c.conflict_id,
+                    "kind": c.kind,
+                    "subject": c.subject,
+                    "severity": c.severity,
+                }
+                for c in bundle.conflicts
+            ],
+        })
+
+    return {
+        "evidence_bundle": {
+            "coverage_score": bundle.coverage_score,
+            "provenance_complete": bundle.provenance_complete,
+            "conflict_count": len(bundle.conflicts),
+        },
+        "evidence_catalog": bundle.evidence,
+        "evidence_conflicts": [
+            {
+                "conflict_id": c.conflict_id,
+                "kind": c.kind,
+                "subject": c.subject,
+                "severity": c.severity,
+                "resolution": c.resolution,
+            }
+            for c in bundle.conflicts
+        ],
+        "grounding_coverage_score": bundle.coverage_score,
+        "provenance_completeness": bundle.provenance_complete,
+        "trace": trace,
+    }
+
+
+async def claim_bind_node(state: AgentState) -> Dict[str, Any]:
+    """Extract claims from generated tests and bind them to verified EvidenceRecords."""
+    files = state.get("generated_files", {})
+    target_ep = state.get("target_entrypoint")
+    all_claims = []
+
+    # 1. Extract AST claims from all generated test files
+    for file_path, code in files.items():
+        if not file_path.endswith((".py",)):
+            continue
+        try:
+            import ast
+            tree = ast.parse(code, filename=file_path)
+            extractor = CodeClaimExtractor(file_path=file_path, target_entrypoint=target_ep)
+            extractor.visit(tree)
+            all_claims.extend(extractor.claims)
+        except Exception:
+            pass
+
+    # 2. Build EvidenceCatalog2 from state
+    ev_items = state.get("evidence_catalog", [])
+    records = []
+    for item in ev_items:
+        if isinstance(item, EvidenceRecord):
+            records.append(item)
+        elif isinstance(item, dict):
+            try:
+                records.append(EvidenceRecord(**item))
+            except Exception:
+                pass
+    catalog = EvidenceCatalog2(records)
+
+    # 3. Bind claims to evidence
+    claimed_citations = []
+    result = ClaimEvidenceBinder.bind(
+        claims=all_claims,
+        catalog=catalog,
+        claimed_citations=claimed_citations,
+        target_entrypoint=target_ep,
+    )
+
+    trace = list(state.get("trace", []))
+    trace.append({
+        "type": "CLAIM_BINDING_COMPLETED",
+        "claims_count": len(result.bindings),
+        "grounded_claim_rate": result.grounded_claim_rate,
+        "citation_accuracy": result.citation_accuracy,
+        "unsupported_count": len(result.unsupported_claims),
+        "unknown_count": len(result.unknown_claims),
+    })
+
+    return {
+        "claim_bindings": [b.model_dump() for b in result.bindings],
+        "grounding_manifest": result.grounding_manifest,
+        "grounded_claim_rate": result.grounded_claim_rate,
+        "unsupported_claims": [b.model_dump() for b in result.unsupported_claims],
+        "trace": trace,
+    }
+
+
+async def repair_grounding_node(state: AgentState) -> Dict[str, Any]:
+    """Formulate targeted grounding queries on test failure to support evidence-backed repair."""
+    failure = state.get("failure_analysis", {})
+    evidence_text = failure.get("evidence", "")
+    queries = RepairGroundingPlanner.formulate_repair_queries(evidence_text)
+
+    trace = list(state.get("trace", []))
+    trace.append({
+        "type": "REPAIR_GROUNDING_COMPLETED",
+        "queries_count": len(queries),
+    })
+
+    return {
+        "repair_plan": {
+            "root_cause": failure.get("root_cause", "unknown"),
+            "queries": [
+                {
+                    "query_id": q.query_id,
+                    "kind": q.kind,
+                    "text": q.text,
+                    "exact_terms": q.exact_terms,
+                }
+                for q in queries
+            ],
+        },
+        "trace": trace,
+    }

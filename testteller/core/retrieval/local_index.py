@@ -54,6 +54,10 @@ class LocalIndex:
                     content TEXT NOT NULL,
                     content_type TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    source_id TEXT DEFAULT '',
+                    commit_sha TEXT DEFAULT '',
+                    line_start INTEGER DEFAULT 0,
+                    line_end INTEGER DEFAULT 0,
                     version INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (collection_name, chunk_id)
@@ -80,6 +84,19 @@ class LocalIndex:
                 );
                 """
             )
+            # Ensure columns exist if table was created in an earlier schema version
+            existing_cols = {row[1] for row in connection.execute("PRAGMA table_info(local_documents)").fetchall()}
+            for col, col_type in [
+                ("source_id", "TEXT DEFAULT ''"),
+                ("commit_sha", "TEXT DEFAULT ''"),
+                ("line_start", "INTEGER DEFAULT 0"),
+                ("line_end", "INTEGER DEFAULT 0"),
+            ]:
+                if col not in existing_cols:
+                    try:
+                        connection.execute(f"ALTER TABLE local_documents ADD COLUMN {col} {col_type}")
+                    except Exception:
+                        pass
 
     def add_documents(
         self, documents: list[str], metadatas: Optional[list[dict]], ids: list[str], collection_name: str
@@ -110,10 +127,12 @@ class LocalIndex:
                 )
                 connection.execute(
                     """INSERT OR REPLACE INTO local_documents
-                    (collection_name, chunk_id, document_id, source, content, content_type, content_hash, version, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (collection_name, chunk_id, document_id, source, content, content_type, content_hash,
+                     source_id, commit_sha, line_start, line_end, version, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (collection_name, entry.chunk_id, entry.document_id, entry.source, entry.content,
-                     entry.content_type, entry.content_hash, version, now),
+                     entry.content_type, entry.content_hash, entry.source_id, entry.commit_sha,
+                     entry.line_start, entry.line_end, version, now),
                 )
                 for term, term_type in self._terms_for_entry(entry):
                     connection.execute(
@@ -165,9 +184,18 @@ class LocalIndex:
         items = []
         for row in rows:
             score, rules = scores[row["chunk_id"]]
+            row_keys = row.keys() if hasattr(row, "keys") else []
+            meta = {
+                "type": row["content_type"],
+                "source_id": row["source_id"] if "source_id" in row_keys else "",
+                "commit_sha": row["commit_sha"] if "commit_sha" in row_keys else "",
+                "line_start": row["line_start"] if "line_start" in row_keys else 0,
+                "line_end": row["line_end"] if "line_end" in row_keys else 0,
+                "content_hash": row["content_hash"] if "content_hash" in row_keys else "",
+            }
             items.append(RetrievalItem(
                 document_id=row["document_id"], chunk_id=row["chunk_id"], source=row["source"],
-                content=row["content"], metadata={"type": row["content_type"]}, local_score=score,
+                content=row["content"], metadata=meta, local_score=score,
                 match_rules=list(dict.fromkeys(rules)),
             ))
         items.sort(key=lambda item: item.local_score or 0.0, reverse=True)
@@ -200,6 +228,17 @@ class LocalIndex:
     def _build_entry(self, content: str, metadata: dict[str, Any], chunk_id: str, collection_name: str) -> LocalIndexEntry:
         source = str(metadata.get("source", "unknown"))
         content_type = str(metadata.get("type", metadata.get("document_type", "document")))
+        source_id = str(metadata.get("source_id", ""))
+        commit_sha = str(metadata.get("commit_sha", ""))
+        try:
+            line_start = int(metadata.get("line_start", 0))
+            line_end = int(metadata.get("line_end", 0))
+        except (ValueError, TypeError):
+            line_start, line_end = 0, 0
+        if not source_id and source != "unknown":
+            from ..evidence.ids import compute_source_id
+            source_id = compute_source_id(metadata.get("repository"), commit_sha, source)
+
         methods = [method.upper() for method in HTTP_METHOD_PATTERN.findall(content)]
         paths = list(dict.fromkeys(normalize_api_path(path) for path in API_PATH_PATTERN.findall(content)))
         symbols = PYTHON_CLASS_PATTERN.findall(content) + PYTHON_FUNCTION_PATTERN.findall(content) + JS_TS_FUNCTION_PATTERN.findall(content)
@@ -215,6 +254,7 @@ class LocalIndex:
             selectors=DATA_TESTID_PATTERN.findall(content), config_keys=config_keys,
             frameworks=[token.lower() for token in keywords if token.lower() in FRAMEWORKS],
             content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            source_id=source_id, commit_sha=commit_sha, line_start=line_start, line_end=line_end,
         )
 
     def _terms_for_entry(self, entry: LocalIndexEntry) -> Iterable[tuple[str, str]]:

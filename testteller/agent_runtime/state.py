@@ -46,3 +46,16 @@ class AgentState(TypedDict, total=False):
     previous_generated_files: dict[str, str]
     weakening_detected: bool
 
+    # Stage 5 RAG Grounding & Traceability
+    pinned_commit: str | None
+    grounding_query_plan: dict[str, Any]
+    evidence_bundle: dict[str, Any]
+    evidence_catalog: list[Any]
+    evidence_conflicts: list[dict[str, Any]]
+    claim_bindings: list[dict[str, Any]]
+    grounding_coverage_score: float
+    provenance_completeness: bool
+    grounding_manifest: dict[str, Any]
+    grounding_history: list[dict[str, Any]]
+    repair_plan: dict[str, Any]
+

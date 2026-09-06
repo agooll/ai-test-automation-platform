@@ -19,6 +19,12 @@ from .state import AgentState
 from .checkpoint import AsyncCheckpointStore, CheckpointStore
 from .tools import AgentToolRegistry, SafeTestExecutor, SandboxPolicy, WorkspaceArtifacts, create_test_executor
 from .trace import TraceRecorder
+from .grounding_nodes import (
+    grounding_plan_node,
+    evidence_build_node,
+    claim_bind_node,
+    repair_grounding_node,
+)
 from ..quality_gate.code_gate import AutomationCodeQualityGate
 from ..quality_gate.code_models import CodeQualityGateResult
 
@@ -144,19 +150,26 @@ class AgenticTestWorkflow:
     def _build_graph(self, checkpointer: Any):
         builder = StateGraph(AgentState)
         builder.add_node("plan", self._plan_node)
+        builder.add_node("grounding_plan", self._grounding_plan_node)
         builder.add_node("retrieve", self._retrieve_node)
+        builder.add_node("evidence_build", self._evidence_build_node)
         builder.add_node("generate", self._generate_node)
+        builder.add_node("claim_bind", self._claim_bind_node)
         builder.add_node("code_quality", self._code_quality_node)
         builder.add_node("execute", self._execute_node)
         builder.add_node("analyze_failure", self._analyze_failure_node)
+        builder.add_node("repair_grounding", self._repair_grounding_node)
         builder.add_node("repair", self._repair_node)
         builder.add_node("review", self._review_node)
         builder.add_node("persist", self._persist_node)
 
         builder.add_edge(START, "plan")
-        builder.add_edge("plan", "retrieve")
-        builder.add_edge("retrieve", "generate")
-        builder.add_edge("generate", "code_quality")
+        builder.add_edge("plan", "grounding_plan")
+        builder.add_edge("grounding_plan", "retrieve")
+        builder.add_edge("retrieve", "evidence_build")
+        builder.add_edge("evidence_build", "generate")
+        builder.add_edge("generate", "claim_bind")
+        builder.add_edge("claim_bind", "code_quality")
 
         builder.add_conditional_edges(
             "code_quality",
@@ -171,12 +184,29 @@ class AgenticTestWorkflow:
         builder.add_conditional_edges(
             "analyze_failure",
             self._route_after_analysis,
-            {"repair": "repair", "review": "review"},
+            {"repair": "repair_grounding", "review": "review"},
         )
-        builder.add_edge("repair", "code_quality")
+        builder.add_edge("repair_grounding", "repair")
+        builder.add_edge("repair", "claim_bind")
         builder.add_edge("review", "persist")
         builder.add_edge("persist", END)
         return builder.compile(checkpointer=checkpointer)
+
+    async def _grounding_plan_node(self, state: AgentState) -> AgentState:
+        res = await grounding_plan_node(state)
+        return self._record(state, "grounding_plan", res)
+
+    async def _evidence_build_node(self, state: AgentState) -> AgentState:
+        res = await evidence_build_node(state)
+        return self._record(state, "evidence_build", res)
+
+    async def _claim_bind_node(self, state: AgentState) -> AgentState:
+        res = await claim_bind_node(state)
+        return self._record(state, "claim_bind", res)
+
+    async def _repair_grounding_node(self, state: AgentState) -> AgentState:
+        res = await repair_grounding_node(state)
+        return self._record(state, "repair_grounding", res)
 
     async def _plan_node(self, state: AgentState) -> AgentState:
         result = await _maybe_call(self.planner, state)
@@ -365,13 +395,21 @@ class AgenticTestWorkflow:
         cq_status = cq_res.get("status", "PASS")
         rev_status = review.get("status", "uncertain")
 
-        # Invariant: final PASS requires execution pass AND code quality PASS AND semantic review pass
+        # Stage 5 Hard Invariant: final PASS requires:
+        # Execution PASS AND code quality PASS AND semantic review pass
+        # AND no blocking evidence conflict AND no unsupported claims
+        has_blocking_conflict = any(
+            isinstance(c, dict) and c.get("severity") == "blocking"
+            for c in state.get("evidence_conflicts", [])
+        )
+        unsupported = state.get("unsupported_claims", [])
+
         if not exec_passed:
             exit_code = execution.get("exit_code")
             verdict = "REJECTED" if exit_code not in (0, None) else "NEEDS_REVIEW"
-        elif cq_status == "REJECTED":
+        elif cq_status == "REJECTED" or unsupported:
             verdict = "REJECTED"
-        elif cq_status == "NEEDS_REVIEW":
+        elif cq_status == "NEEDS_REVIEW" or has_blocking_conflict:
             verdict = "NEEDS_REVIEW"
         elif rev_status == "fail":
             verdict = "REJECTED"

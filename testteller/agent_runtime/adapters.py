@@ -117,6 +117,19 @@ class ExistingRAGAdapter:
         cq_feedback = state.get("code_quality_result", {}).get("repair_feedback", [])
         cq_block = "\n".join(cq_feedback) if cq_feedback else "None"
 
+        # Format verified evidence catalog for repair prompt
+        ev_items = state.get("evidence_catalog", [])
+        if ev_items:
+            ev_lines = []
+            for e in ev_items[:20]:
+                eid = getattr(e, "evidence_id", "") or e.get("evidence_id", "") if isinstance(e, dict) else ""
+                ekind = getattr(e, "kind", "") or e.get("kind", "") if isinstance(e, dict) else ""
+                eval_ = getattr(e, "value", "") or e.get("value", "") if isinstance(e, dict) else ""
+                ev_lines.append(f"- [{eid}] {ekind}: {eval_}")
+            ev_summary = "\n".join(ev_lines)
+        else:
+            ev_summary = "None"
+
         for name, code in list(files.items()):
             if not name.endswith((".py", ".js", ".ts", ".java")):
                 continue
@@ -124,6 +137,8 @@ class ExistingRAGAdapter:
 You may correct implementation mistakes or fix syntax/imports,
 but you MUST NOT make the test pass by weakening, deleting, or removing business assertions.
 You MUST NOT use tautological assertions (e.g. assert True or assert 1 == 1) or swallow exceptions (except: pass).
+You may only introduce factual project-specific claims supported by the verified evidence catalog.
+Do not invent endpoints, symbols, or mock out the target SUT.
 
 FAILURE TYPE: {failure.get('root_cause', 'unknown')}
 FAILED TESTS: {failure.get('failed_tests', [])}
@@ -132,6 +147,9 @@ EXECUTION EVIDENCE:
 
 CODE QUALITY & ANTI-COUNTERFEIT FEEDBACK:
 {cq_block}
+
+VERIFIED EVIDENCE CATALOG:
+{ev_summary}
 
 CURRENT FILE ({name}):
 {code}

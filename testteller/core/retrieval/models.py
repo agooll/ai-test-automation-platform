@@ -51,6 +51,10 @@ class LocalIndexEntry:
     config_keys: list[str] = field(default_factory=list)
     frameworks: list[str] = field(default_factory=list)
     content_hash: str = ""
+    source_id: str = ""
+    commit_sha: str = ""
+    line_start: int = 0
+    line_end: int = 0
     version: int = 1
 
 

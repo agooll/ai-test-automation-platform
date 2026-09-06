@@ -16,7 +16,13 @@ class HybridRetriever:
         self.local_index = local_index
         self.query_analyzer = QueryAnalyzer()
 
-    async def retrieve(self, query: str, collection_name: str, limit: int = 5) -> RetrievalResult:
+    async def retrieve(
+        self,
+        query: str,
+        collection_name: str,
+        limit: int = 5,
+        pinned_commit: Optional[str] = None,
+    ) -> RetrievalResult:
         started = time.perf_counter()
         analysis = self.query_analyzer.analyze(query)
         local = await asyncio.to_thread(self.local_index.search, analysis, collection_name, limit)
@@ -35,13 +41,53 @@ class HybridRetriever:
         elif strategy == "vector":
             documents = vector_items
         else:
-            documents = fuse_results(local.items, vector_items, limit)
+            documents = fuse_results(local.items, vector_items, limit, pinned_commit=pinned_commit)
         return RetrievalResult(
             documents=documents, strategy=strategy, query_intent=analysis.intent,
             match_type=local.match_type, local_hit_count=len(local.items), vector_hit_count=len(vector_items),
             embedding_called=embedding_called, fallback_reason=reason,
             elapsed_ms=(time.perf_counter() - started) * 1000,
         )
+
+    async def retrieve_plan(
+        self,
+        plan: Any,
+        collection_name: str,
+        limit_per_query: int = 3,
+        total_limit: int = 10,
+        pinned_commit: Optional[str] = None,
+    ) -> list[RetrievalItem]:
+        """Execute all queries in a GroundingQueryPlan with SQLite-first exact lookups and RRF fusion."""
+        all_local: list[RetrievalItem] = []
+        all_vector: list[RetrievalItem] = []
+        for q in getattr(plan, "queries", []):
+            analysis = self.query_analyzer.analyze(q.text)
+            if q.kind == "target_symbol" and q.exact_terms:
+                analysis.symbols = list(dict.fromkeys(analysis.symbols + q.exact_terms))
+            elif q.kind == "api_endpoint" and q.exact_terms:
+                for t in q.exact_terms:
+                    parts = t.split(maxsplit=1)
+                    if len(parts) == 2:
+                        analysis.api_methods.append(parts[0].upper())
+                        analysis.api_paths.append(parts[1])
+                    else:
+                        analysis.api_paths.append(t)
+            elif q.kind == "config" and q.exact_terms:
+                analysis.config_keys = list(dict.fromkeys(analysis.config_keys + q.exact_terms))
+
+            # Query exact SQLite local index
+            local = await asyncio.to_thread(self.local_index.search, analysis, collection_name, limit_per_query)
+            all_local.extend(local.items)
+
+            # Query vector store if local not unique or query represents semantic context
+            if not local.items or q.kind in ("auth_pattern", "behavior_contract", "model_field"):
+                try:
+                    raw = await asyncio.to_thread(self.vector_store.query_similar, q.text, limit_per_query)
+                    all_vector.extend(self._to_vector_items(raw))
+                except Exception:
+                    pass
+
+        return fuse_results(all_local, all_vector, total_limit, pinned_commit=pinned_commit)
 
     def _decide_strategy(self, intent: QueryIntent, local_result) -> Tuple[str, Optional[str]]:
         if intent in {QueryIntent.FACT_LOOKUP, QueryIntent.LOCATE} and local_result.match_type == MatchType.EXACT and local_result.unique:

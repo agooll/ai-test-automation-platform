@@ -187,8 +187,23 @@ class ChromaDBManager:
 
                 docs_to_add.append(documents[i])
                 embeddings_to_add.append(embeddings[i])
-                if metadatas:
-                    metadatas_to_add.append(metadatas[i])
+                meta = dict(metadatas[i]) if metadatas and i < len(metadatas) and metadatas[i] else {}
+                from ..evidence.ids import compute_source_id, compute_content_hash
+                doc_text = documents[i]
+                c_hash = str(meta.get("content_hash") or compute_content_hash(doc_text))
+                src = str(meta.get("source") or "unknown")
+                s_id = str(meta.get("source_id") or compute_source_id(meta.get("repository"), meta.get("commit_sha"), src))
+                meta["content_hash"] = c_hash
+                meta["source_id"] = s_id
+                meta["chunk_id"] = str(meta.get("chunk_id") or doc_id)
+                meta["source"] = src
+                if "commit_sha" not in meta:
+                    meta["commit_sha"] = ""
+                if "line_start" not in meta:
+                    meta["line_start"] = 0
+                if "line_end" not in meta:
+                    meta["line_end"] = 0
+                metadatas_to_add.append(meta)
                 ids_to_add.append(doc_id)
                 seen_ids.add(doc_id)
 
