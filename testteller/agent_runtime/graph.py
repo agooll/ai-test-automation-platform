@@ -200,12 +200,16 @@ class AgenticTestWorkflow:
         req = state.get("requirement", "")
         target = state.get("target_entrypoint")
         context = state.get("retrieved_context", [])
+        ws = state.get("workspace") or state.get("workspace_dir") or state.get("repo_path")
+        catalog = state.get("grounding_catalog")
 
         gate_res: CodeQualityGateResult = await self.code_quality_gate.evaluate(
             generated_files=files,
             requirement=req,
             target_entrypoint=target,
             retrieved_context=context,
+            evidence_catalog=catalog,
+            repo_path=ws,
         )
 
         history_entry = {

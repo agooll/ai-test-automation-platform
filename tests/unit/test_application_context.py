@@ -465,3 +465,60 @@ SERVER_URL = 'https://production.api.com'
         
         assert isinstance(patterns, dict)
         # Should attempt to extract framework configurations
+
+    def test_to_evidence_items(self):
+        """Test converting ApplicationContext to EvidenceItems."""
+        ctx = ApplicationContext(
+            api_endpoints={
+                "GET:/api/users": APIEndpoint(
+                    path="/api/users",
+                    method="GET",
+                    source_refs=["src/api/users.py"],
+                    evidence_ids=["E-API-GET-/api/users"],
+                )
+            },
+            ui_selectors={
+                "[data-testid='submit']": UIPattern(
+                    selector="[data-testid='submit']",
+                    element_type="button",
+                    source_refs=["src/components/Login.tsx"],
+                    evidence_ids=["E-UI-[data-testid='submit']"],
+                )
+            },
+            data_schemas={
+                "User": DataSchema(
+                    model_name="User",
+                    fields={"id": "int", "email": "str"},
+                    source_refs=["src/models/user.py"],
+                )
+            },
+            auth_patterns=AuthPattern(
+                auth_type="jwt",
+                login_endpoint="/api/auth/login",
+                source_refs=["src/auth/jwt.py"],
+                evidence_ids=["E-AUTH-/api/auth/login"],
+            ),
+        )
+
+        evidence_items = ctx.to_evidence_items()
+        assert len(evidence_items) == 5
+
+        kinds = {item.kind for item in evidence_items}
+        assert kinds == {"api_endpoint", "ui_selector", "model_field", "auth_pattern"}
+
+        api_item = next(i for i in evidence_items if i.kind == "api_endpoint")
+        assert api_item.value == "GET /api/users"
+        assert api_item.source == "src/api/users.py"
+        assert api_item.evidence_id == "E-API-GET-/api/users"
+
+        ui_item = next(i for i in evidence_items if i.kind == "ui_selector")
+        assert ui_item.value == "[data-testid='submit']"
+        assert ui_item.source == "src/components/Login.tsx"
+
+        schema_items = [i for i in evidence_items if i.kind == "model_field"]
+        assert len(schema_items) == 2
+        assert {s.value for s in schema_items} == {"User.id", "User.email"}
+
+        auth_item = next(i for i in evidence_items if i.kind == "auth_pattern")
+        assert auth_item.value == "/api/auth/login"
+        assert auth_item.source == "src/auth/jwt.py"

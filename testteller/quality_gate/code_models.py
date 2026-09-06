@@ -1,4 +1,4 @@
-"""Canonical data contracts for automation code quality and anti-counterfeiting."""
+"""Canonical data contracts for automation code quality, anti-counterfeiting, and grounding."""
 
 from __future__ import annotations
 
@@ -22,6 +22,9 @@ class CodeViolationCode(str, Enum):
     UNCONDITIONAL_SKIP = "UNCONDITIONAL_SKIP"
     UNSUPPORTED_XFAIL = "UNSUPPORTED_XFAIL"
     UNREACHABLE_ASSERTION = "UNREACHABLE_ASSERTION"
+    HALLUCINATED_SYMBOL = "HALLUCINATED_SYMBOL"
+    UNSUPPORTED_API_ENDPOINT = "UNSUPPORTED_API_ENDPOINT"
+    UNSUPPORTED_UI_SELECTOR = "UNSUPPORTED_UI_SELECTOR"
 
 
 class CodeViolation(BaseModel):
@@ -35,6 +38,46 @@ class CodeViolation(BaseModel):
     message: str
     severity: Literal["error", "warning"] = "error"
     suggestion: Optional[str] = None
+
+
+class EvidenceItem(BaseModel):
+    """A machine-verifiable factual evidence item discovered from codebase or docs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    kind: Literal[
+        "api_endpoint",
+        "ui_selector",
+        "model_field",
+        "target_symbol",
+        "config",
+        "auth_pattern",
+    ]
+    value: str
+    source: str
+    source_chunk_id: Optional[str] = None
+    confidence: float = 1.0
+
+
+class ClaimItem(BaseModel):
+    """An explicit factual claim extracted from generated test code."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str
+    kind: Literal[
+        "api_endpoint",
+        "ui_selector",
+        "model_field",
+        "target_symbol",
+    ]
+    value: str
+    file_path: str
+    line_number: Optional[int] = None
+    matched_evidence_id: Optional[str] = None
+    status: Literal["SUPPORTED", "UNSUPPORTED", "UNKNOWN"] = "UNKNOWN"
+    reason: Optional[str] = None
 
 
 class GroundingFinding(BaseModel):

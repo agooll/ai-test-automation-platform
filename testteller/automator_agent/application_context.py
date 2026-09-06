@@ -28,6 +28,8 @@ class APIEndpoint:
     request_schema: Optional[Dict] = None
     response_schema: Optional[Dict] = None
     auth_required: bool = False
+    source_refs: List[str] = field(default_factory=list)
+    evidence_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -37,6 +39,8 @@ class UIPattern:
     element_type: str
     description: Optional[str] = None
     page_context: Optional[str] = None
+    source_refs: List[str] = field(default_factory=list)
+    evidence_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +50,8 @@ class AuthPattern:
     login_endpoint: Optional[str] = None
     token_header: Optional[str] = None
     login_selectors: Dict[str, str] = field(default_factory=dict)
+    source_refs: List[str] = field(default_factory=list)
+    evidence_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -54,6 +60,8 @@ class DataSchema:
     model_name: str
     fields: Dict[str, str] = field(default_factory=dict)
     required_fields: List[str] = field(default_factory=list)
+    source_refs: List[str] = field(default_factory=list)
+    evidence_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +74,75 @@ class ApplicationContext:
     data_schemas: Dict[str, DataSchema] = field(default_factory=dict)
     existing_test_patterns: List[str] = field(default_factory=list)
     framework_patterns: Dict[str, Any] = field(default_factory=dict)
+
+    def to_evidence_items(self) -> List[Any]:
+        """Convert discovered application knowledge into canonical EvidenceItems for Stage 4 Grounding."""
+        from ..quality_gate.code_models import EvidenceItem
+
+        items: List[EvidenceItem] = []
+
+        # 1. API endpoints
+        for key, ep in self.api_endpoints.items():
+            val = f"{ep.method.upper()} {ep.path}"
+            src = ep.source_refs[0] if ep.source_refs else "discovered:api"
+            eid = ep.evidence_ids[0] if ep.evidence_ids else f"E-API-{len(items)+1:03d}"
+            items.append(
+                EvidenceItem(
+                    evidence_id=eid,
+                    kind="api_endpoint",
+                    value=val,
+                    source=src,
+                    confidence=1.0,
+                )
+            )
+
+        # 2. UI selectors
+        for key, ui in self.ui_selectors.items():
+            src = ui.source_refs[0] if ui.source_refs else "discovered:ui"
+            eid = ui.evidence_ids[0] if ui.evidence_ids else f"E-UI-{len(items)+1:03d}"
+            items.append(
+                EvidenceItem(
+                    evidence_id=eid,
+                    kind="ui_selector",
+                    value=ui.selector,
+                    source=src,
+                    confidence=1.0,
+                )
+            )
+
+        # 3. Data schemas
+        for model_name, schema in self.data_schemas.items():
+            src = schema.source_refs[0] if schema.source_refs else "discovered:model"
+            for field_name in schema.fields:
+                items.append(
+                    EvidenceItem(
+                        evidence_id=f"E-SCHEMA-{model_name}-{field_name}",
+                        kind="model_field",
+                        value=f"{model_name}.{field_name}",
+                        source=src,
+                        confidence=1.0,
+                    )
+                )
+
+        # 4. Auth patterns
+        if self.auth_patterns and self.auth_patterns.login_endpoint:
+            src = self.auth_patterns.source_refs[0] if self.auth_patterns.source_refs else "discovered:auth"
+            eid = (
+                self.auth_patterns.evidence_ids[0]
+                if self.auth_patterns.evidence_ids
+                else f"E-AUTH-{len(items)+1:03d}"
+            )
+            items.append(
+                EvidenceItem(
+                    evidence_id=eid,
+                    kind="auth_pattern",
+                    value=self.auth_patterns.login_endpoint,
+                    source=src,
+                    confidence=1.0,
+                )
+            )
+
+        return items
 
 
 class ApplicationKnowledgeExtractor:
@@ -119,6 +196,18 @@ class ApplicationKnowledgeExtractor:
             logger.error(f"Failed to extract application context: {e}")
             return ApplicationContext()  # Return empty context
     
+    @staticmethod
+    def _extract_source_ref(metadatas: Optional[List[Any]], idx: int) -> str:
+        """Extract source reference string from vector store metadata."""
+        if not metadatas or idx >= len(metadatas):
+            return ""
+        meta = metadatas[idx]
+        if isinstance(meta, dict):
+            return str(meta.get("source") or meta.get("file_path") or meta.get("path") or "")
+        elif isinstance(meta, str):
+            return meta
+        return ""
+
     def _discover_api_endpoints(self, test_cases: List[TestCase]) -> Dict[str, APIEndpoint]:
         """Find real API endpoints from product docs and code."""
         endpoints = {}
@@ -143,8 +232,11 @@ class ApplicationKnowledgeExtractor:
             )
             
             if results and results.get('documents'):
-                for doc in results['documents'][0]:
-                    discovered_endpoints = self._parse_endpoints_from_content(doc)
+                docs = results['documents'][0]
+                metas = results.get('metadatas', [[]])[0] if results.get('metadatas') else []
+                for i, doc in enumerate(docs):
+                    src_ref = self._extract_source_ref(metas, i)
+                    discovered_endpoints = self._parse_endpoints_from_content(doc, source_ref=src_ref)
                     endpoints.update(discovered_endpoints)
                     
             # Also search specifically for OpenAPI/Swagger documentation
@@ -155,8 +247,11 @@ class ApplicationKnowledgeExtractor:
             )
             
             if swagger_results and swagger_results.get('documents'):
-                for doc in swagger_results['documents'][0]:
-                    swagger_endpoints = self._parse_openapi_spec(doc)
+                docs = swagger_results['documents'][0]
+                metas = swagger_results.get('metadatas', [[]])[0] if swagger_results.get('metadatas') else []
+                for i, doc in enumerate(docs):
+                    src_ref = self._extract_source_ref(metas, i)
+                    swagger_endpoints = self._parse_openapi_spec(doc, source_ref=src_ref)
                     endpoints.update(swagger_endpoints)
                     
         except Exception as e:
@@ -178,8 +273,11 @@ class ApplicationKnowledgeExtractor:
             )
             
             if test_results and test_results.get('documents'):
-                for doc in test_results['documents'][0]:
-                    test_patterns = self._extract_ui_selectors_from_test_code(doc)
+                docs = test_results['documents'][0]
+                metas = test_results.get('metadatas', [[]])[0] if test_results.get('metadatas') else []
+                for i, doc in enumerate(docs):
+                    src_ref = self._extract_source_ref(metas, i)
+                    test_patterns = self._extract_ui_selectors_from_test_code(doc, source_ref=src_ref)
                     ui_patterns.update(test_patterns)
             
             # Query for UI component definitions
@@ -191,8 +289,11 @@ class ApplicationKnowledgeExtractor:
             )
             
             if ui_results and ui_results.get('documents'):
-                for doc in ui_results['documents'][0]:
-                    component_patterns = self._extract_ui_selectors_from_components(doc)
+                docs = ui_results['documents'][0]
+                metas = ui_results.get('metadatas', [[]])[0] if ui_results.get('metadatas') else []
+                for i, doc in enumerate(docs):
+                    src_ref = self._extract_source_ref(metas, i)
+                    component_patterns = self._extract_ui_selectors_from_components(doc, source_ref=src_ref)
                     ui_patterns.update(component_patterns)
                     
         except Exception as e:
@@ -213,14 +314,20 @@ class ApplicationKnowledgeExtractor:
             if not auth_results or not auth_results.get('documents'):
                 return None
                 
-            auth_info = self._analyze_auth_patterns(auth_results['documents'][0])
+            docs = auth_results['documents'][0]
+            metas = auth_results.get('metadatas', [[]])[0] if auth_results.get('metadatas') else []
+            src_ref = self._extract_source_ref(metas, 0)
+            auth_info = self._analyze_auth_patterns(docs)
             
             if auth_info:
+                endpoint = auth_info.get('endpoint')
                 return AuthPattern(
                     auth_type=auth_info.get('type', 'unknown'),
-                    login_endpoint=auth_info.get('endpoint'),
+                    login_endpoint=endpoint,
                     token_header=auth_info.get('token_header'),
-                    login_selectors=auth_info.get('login_selectors', {})
+                    login_selectors=auth_info.get('login_selectors', {}),
+                    source_refs=[src_ref] if src_ref else [],
+                    evidence_ids=[f"E-AUTH-{endpoint}"] if endpoint else ["E-AUTH-login"]
                 )
                 
         except Exception as e:
@@ -245,8 +352,11 @@ class ApplicationKnowledgeExtractor:
             )
             
             if model_results and model_results.get('documents'):
-                for doc in model_results['documents'][0]:
-                    discovered_schemas = self._extract_data_schemas_from_code(doc)
+                docs = model_results['documents'][0]
+                metas = model_results.get('metadatas', [[]])[0] if model_results.get('metadatas') else []
+                for i, doc in enumerate(docs):
+                    src_ref = self._extract_source_ref(metas, i)
+                    discovered_schemas = self._extract_data_schemas_from_code(doc, source_ref=src_ref)
                     schemas.update(discovered_schemas)
                     
         except Exception as e:
@@ -310,7 +420,7 @@ class ApplicationKnowledgeExtractor:
             
         return patterns
     
-    def _parse_endpoints_from_content(self, content: str) -> Dict[str, APIEndpoint]:
+    def _parse_endpoints_from_content(self, content: str, source_ref: str = "") -> Dict[str, APIEndpoint]:
         """Parse API endpoints from code content."""
         endpoints = {}
         
@@ -339,7 +449,9 @@ class ApplicationKnowledgeExtractor:
                         endpoints[endpoint_key] = APIEndpoint(
                             path=path,
                             method=method,
-                            description=f"Discovered from code"
+                            description=f"Discovered from code",
+                            source_refs=[source_ref] if source_ref else [],
+                            evidence_ids=[f"E-API-{method}-{path}"],
                         )
                         
         except Exception as e:
@@ -347,7 +459,7 @@ class ApplicationKnowledgeExtractor:
             
         return endpoints
     
-    def _parse_openapi_spec(self, content: str) -> Dict[str, APIEndpoint]:
+    def _parse_openapi_spec(self, content: str, source_ref: str = "") -> Dict[str, APIEndpoint]:
         """Parse endpoints from OpenAPI/Swagger specification."""
         endpoints = {}
         
@@ -375,7 +487,9 @@ class ApplicationKnowledgeExtractor:
                             description=method_info.get('summary', ''),
                             request_schema=method_info.get('requestBody'),
                             response_schema=method_info.get('responses'),
-                            auth_required='security' in method_info
+                            auth_required='security' in method_info,
+                            source_refs=[source_ref] if source_ref else [],
+                            evidence_ids=[f"E-API-{method.upper()}-{path}"],
                         )
                         
         except Exception as e:
@@ -383,7 +497,7 @@ class ApplicationKnowledgeExtractor:
             
         return endpoints
     
-    def _extract_ui_selectors_from_test_code(self, content: str) -> Dict[str, UIPattern]:
+    def _extract_ui_selectors_from_test_code(self, content: str, source_ref: str = "") -> Dict[str, UIPattern]:
         """Extract UI selectors from existing test code."""
         patterns = {}
         
@@ -408,7 +522,9 @@ class ApplicationKnowledgeExtractor:
                         patterns[selector] = UIPattern(
                             selector=selector,
                             element_type=element_type,
-                            description=f"Found in test code"
+                            description=f"Found in test code",
+                            source_refs=[source_ref] if source_ref else [],
+                            evidence_ids=[f"E-UI-{selector}"],
                         )
                         
         except Exception as e:
@@ -416,7 +532,7 @@ class ApplicationKnowledgeExtractor:
             
         return patterns
     
-    def _extract_ui_selectors_from_components(self, content: str) -> Dict[str, UIPattern]:
+    def _extract_ui_selectors_from_components(self, content: str, source_ref: str = "") -> Dict[str, UIPattern]:
         """Extract potential selectors from UI component code."""
         patterns = {}
         
@@ -444,7 +560,9 @@ class ApplicationKnowledgeExtractor:
                     patterns[selector] = UIPattern(
                         selector=selector,
                         element_type=self._infer_element_type_from_context(content, value),
-                        description=f"Found in component code"
+                        description=f"Found in component code",
+                        source_refs=[source_ref] if source_ref else [],
+                        evidence_ids=[f"E-UI-{selector}"],
                     )
                     
         except Exception as e:
@@ -488,7 +606,7 @@ class ApplicationKnowledgeExtractor:
             
         return auth_info if auth_info else None
     
-    def _extract_data_schemas_from_code(self, content: str) -> Dict[str, DataSchema]:
+    def _extract_data_schemas_from_code(self, content: str, source_ref: str = "") -> Dict[str, DataSchema]:
         """Extract data schemas from model definitions."""
         schemas = {}
         
@@ -509,7 +627,9 @@ class ApplicationKnowledgeExtractor:
                     if fields:
                         schemas[model_name] = DataSchema(
                             model_name=model_name,
-                            fields=fields
+                            fields=fields,
+                            source_refs=[source_ref] if source_ref else [],
+                            evidence_ids=[f"E-SCHEMA-{model_name}"],
                         )
                         
         except Exception as e:

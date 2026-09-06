@@ -6,15 +6,23 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .code_models import (
+    ClaimItem,
     CodeQualityGateResult,
     CodeViolation,
     CodeViolationCode,
+    EvidenceItem,
     GroundingFinding,
 )
 from .code_rules import (
     check_placeholders,
     check_syntax_and_parse,
     validate_test_functions,
+)
+from .grounding import (
+    CodeClaimExtractor,
+    EvidenceCatalog,
+    GroundingValidator,
+    RepoSymbolExtractor,
 )
 from .python_analyzer import analyze_test_module
 
@@ -32,14 +40,17 @@ class AutomationCodeQualityGate:
         generated_files: Dict[str, str],
         requirement: str = "",
         target_entrypoint: Optional[str] = None,
-        retrieved_context: Optional[List[dict]] = None,
+        retrieved_context: Optional[List[Any]] = None,
         use_ai: bool = False,
+        evidence_catalog: Optional[EvidenceCatalog] = None,
+        repo_path: Optional[str] = None,
     ) -> CodeQualityGateResult:
-        """Run deterministic AST rules on generated test files."""
+        """Run deterministic AST rules and grounding validation on generated test files."""
         hard_violations: List[CodeViolation] = []
         grounding_findings: List[GroundingFinding] = []
         total_tests = 0
         repair_feedback: List[str] = []
+        all_claims: List[ClaimItem] = []
 
         if not generated_files:
             hard_violations.append(
@@ -62,6 +73,25 @@ class AutomationCodeQualityGate:
                 allow_final_pass=False,
                 repair_feedback=["No test files were generated."],
             )
+
+        # 0. Build or enrich EvidenceCatalog
+        catalog = evidence_catalog or EvidenceCatalog()
+        if target_entrypoint:
+            entrypoint_symbols = RepoSymbolExtractor.extract_from_entrypoint(
+                target_entrypoint, repo_root=repo_path
+            )
+            catalog.add_items(entrypoint_symbols)
+
+        if retrieved_context:
+            for ctx_item in retrieved_context:
+                if isinstance(ctx_item, EvidenceItem):
+                    catalog.add_item(ctx_item)
+                elif isinstance(ctx_item, dict):
+                    if "evidence_id" in ctx_item and "kind" in ctx_item and "value" in ctx_item:
+                        try:
+                            catalog.add_item(EvidenceItem(**ctx_item))
+                        except Exception:
+                            pass
 
         test_files_found = 0
 
@@ -93,6 +123,14 @@ class AutomationCodeQualityGate:
             )
             hard_violations.extend(rule_violations)
 
+            # 5. Extract claims for grounding analysis
+            claim_extractor = CodeClaimExtractor(
+                file_path=file_path,
+                target_entrypoint=target_entrypoint,
+            )
+            claim_extractor.visit(tree)
+            all_claims.extend(claim_extractor.claims)
+
         if test_files_found == 0:
             hard_violations.append(
                 CodeViolation(
@@ -104,12 +142,34 @@ class AutomationCodeQualityGate:
                 )
             )
 
-        # Calculate vacuity score: 1.0 if perfectly clean, 0.0 if saturated with violations
-        if total_tests == 0 and hard_violations:
+        # 6. Validate claims against EvidenceCatalog
+        if all_claims:
+            g_violations, g_findings, g_score = GroundingValidator.validate(
+                claims=all_claims,
+                catalog=catalog,
+            )
+            hard_violations.extend(g_violations)
+            grounding_findings.extend(g_findings)
+            grounding_score = g_score
+        else:
+            grounding_score = 1.0
+
+        # Calculate vacuity score: 1.0 if clean, 0.0 if saturated with AST violations
+        ast_error_count = sum(
+            1
+            for v in hard_violations
+            if v.severity == "error"
+            and v.code
+            not in (
+                CodeViolationCode.UNSUPPORTED_API_ENDPOINT,
+                CodeViolationCode.UNSUPPORTED_UI_SELECTOR,
+                CodeViolationCode.HALLUCINATED_SYMBOL,
+            )
+        )
+        if total_tests == 0 and ast_error_count > 0:
             vacuity_score = 0.0
-        elif hard_violations:
-            error_count = sum(1 for v in hard_violations if v.severity == "error")
-            vacuity_score = max(0.0, 1.0 - (error_count / max(total_tests, 1)))
+        elif ast_error_count > 0:
+            vacuity_score = max(0.0, 1.0 - (ast_error_count / max(total_tests, 1)))
         else:
             vacuity_score = 1.0
 
@@ -134,11 +194,12 @@ class AutomationCodeQualityGate:
         allow_final_pass = not has_errors
 
         logger.info(
-            "AutomationCodeQualityGate verdict: status=%s, violations=%d, total_tests=%d, vacuity_score=%.2f",
+            "AutomationCodeQualityGate verdict: status=%s, violations=%d, total_tests=%d, vacuity_score=%.2f, grounding_score=%.2f",
             status,
             len(hard_violations),
             total_tests,
             vacuity_score,
+            grounding_score,
         )
 
         return CodeQualityGateResult(
@@ -146,7 +207,7 @@ class AutomationCodeQualityGate:
             hard_violations=hard_violations,
             grounding_findings=grounding_findings,
             vacuity_score=round(vacuity_score, 4),
-            grounding_score=1.0,
+            grounding_score=round(grounding_score, 4),
             total_tests_scanned=total_tests,
             allow_execution=allow_execution,
             allow_final_pass=allow_final_pass,

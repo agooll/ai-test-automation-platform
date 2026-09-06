@@ -12,6 +12,13 @@ from .code_models import (
 )
 from .python_analyzer import TestFunctionAnalysis, analyze_test_module
 
+from .grounding import (
+    CodeClaimExtractor,
+    EvidenceCatalog,
+    GroundingValidator,
+    RepoSymbolExtractor,
+)
+
 __all__ = [
     "QualityGate",
     "QualityGateResult",
@@ -25,4 +32,8 @@ __all__ = [
     "CodeSemanticReview",
     "TestFunctionAnalysis",
     "analyze_test_module",
+    "EvidenceCatalog",
+    "GroundingValidator",
+    "RepoSymbolExtractor",
+    "CodeClaimExtractor",
 ]
