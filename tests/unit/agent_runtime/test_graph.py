@@ -8,7 +8,7 @@ from testteller.agent_runtime.graph import AgenticTestWorkflow
 @pytest.mark.asyncio
 async def test_graph_passes_and_records_trace(tmp_path: Path):
     def generator(state):
-        return {"test_ok.py": "def test_ok():\n    assert True\n"}
+        return {"test_ok.py": "def test_ok():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
 
     workflow = AgenticTestWorkflow(generator=generator)
     result = await workflow.run({
@@ -24,7 +24,7 @@ async def test_graph_passes_and_records_trace(tmp_path: Path):
     assert result["execution_success"] is True
     assert result["repair_success"] is False
     assert [event["node"] for event in result["trace"]] == [
-        "plan", "retrieve", "generate", "execute", "review", "persist"
+        "plan", "retrieve", "generate", "code_quality", "execute", "review", "persist"
     ]
 
 
@@ -33,11 +33,11 @@ async def test_graph_repairs_after_failure(tmp_path: Path):
     attempts = {"count": 0}
 
     def generator(state):
-        return {"test_case.py": "def test_case():\n    assert False\n"}
+        return {"test_case.py": "def test_case():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 40\n"}
 
     def repairer(state):
         attempts["count"] += 1
-        return {"test_case.py": "def test_case():\n    assert True\n"}
+        return {"test_case.py": "def test_case():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
 
     workflow = AgenticTestWorkflow(generator=generator, repairer=repairer)
     result = await workflow.run({
@@ -54,15 +54,15 @@ async def test_graph_repairs_after_failure(tmp_path: Path):
     assert result["repair_round"] == 1
     assert result["repair_success"] is True
     assert "analyze_failure" in [event["node"] for event in result["trace"]]
+    assert "code_quality" in [event["node"] for event in result["trace"]]
     assert (tmp_path / "trace.jsonl").read_text(encoding="utf-8").count("\n") == len(result["trace"])
 
     # Verify repair_history multi-round diff tracking
     assert len(result["repair_history"]) == 1
-    hist = result["repair_history"][0]
-    assert hist["round"] == 1
-    assert hist["re_execution_passed"] is True
-    assert "test_case.py" in hist["files"]
-    assert hist["files"]["test_case.py"]["diff"] != ""
-    assert "-    assert False" in hist["files"]["test_case.py"]["diff"]
-    assert "+    assert True" in hist["files"]["test_case.py"]["diff"]
-
+    first_repair = result["repair_history"][0]
+    assert first_repair["round"] == 1
+    assert first_repair["re_execution_passed"] is True
+    assert "test_case.py" in first_repair["files"]
+    diff = first_repair["files"]["test_case.py"]["diff"]
+    assert "-    assert res == 40" in diff
+    assert "+    assert res == 42" in diff

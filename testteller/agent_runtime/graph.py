@@ -1,4 +1,4 @@
-"""LangGraph orchestration for a bounded test generation and repair loop."""
+"""LangGraph orchestration for a bounded test generation and repair loop with code quality gates."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ from .state import AgentState
 from .checkpoint import AsyncCheckpointStore, CheckpointStore
 from .tools import AgentToolRegistry, SafeTestExecutor, SandboxPolicy, WorkspaceArtifacts, create_test_executor
 from .trace import TraceRecorder
+from ..quality_gate.code_gate import AutomationCodeQualityGate
+from ..quality_gate.code_models import CodeQualityGateResult
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ class AgenticTestWorkflow:
         generator: Generator | None = None,
         repairer: Repairer | None = None,
         reviewer: Reviewer | None = None,
+        code_quality_gate: AutomationCodeQualityGate | None = None,
         tool_registry: AgentToolRegistry | None = None,
         checkpointer: Any | None = None,
         checkpoint_path: str | None = None,
@@ -57,6 +60,7 @@ class AgenticTestWorkflow:
         self.generator = generator or self._default_generator
         self.repairer = repairer or self._default_repairer
         self.reviewer = reviewer or self._default_reviewer
+        self.code_quality_gate = code_quality_gate or AutomationCodeQualityGate()
         self.tools = tool_registry or AgentToolRegistry()
         self.event_sink = event_sink
         self.execution_backend = execution_backend
@@ -67,7 +71,6 @@ class AgenticTestWorkflow:
         self._async_checkpoint_store = None
         self._checkpoint_path = checkpoint_path
         if checkpointer is None and checkpoint_path:
-            # AsyncSqliteSaver is initialized lazily because its connection is async.
             checkpointer = MemorySaver()
         self.graph = self._build_graph(checkpointer or MemorySaver())
 
@@ -104,6 +107,7 @@ class AgenticTestWorkflow:
         initial.setdefault("repair_history", [])
         initial.setdefault("trace", [])
         initial.setdefault("generated_files", {})
+        initial.setdefault("code_quality_history", [])
         config = {"configurable": {"thread_id": thread_id or initial["task_id"]}}
         self._emit_event("RUN_STARTED", {"task_id": initial["task_id"], "requirement": initial.get("requirement", "")})
         result = await self.graph.ainvoke(initial, config=config)
@@ -142,20 +146,34 @@ class AgenticTestWorkflow:
         builder.add_node("plan", self._plan_node)
         builder.add_node("retrieve", self._retrieve_node)
         builder.add_node("generate", self._generate_node)
+        builder.add_node("code_quality", self._code_quality_node)
         builder.add_node("execute", self._execute_node)
         builder.add_node("analyze_failure", self._analyze_failure_node)
         builder.add_node("repair", self._repair_node)
         builder.add_node("review", self._review_node)
         builder.add_node("persist", self._persist_node)
+
         builder.add_edge(START, "plan")
         builder.add_edge("plan", "retrieve")
         builder.add_edge("retrieve", "generate")
-        builder.add_edge("generate", "execute")
-        builder.add_conditional_edges("execute", self._route_after_execute,
-                                      {"review": "review", "analyze_failure": "analyze_failure"})
-        builder.add_conditional_edges("analyze_failure", self._route_after_analysis,
-                                      {"repair": "repair", "review": "review"})
-        builder.add_edge("repair", "execute")
+        builder.add_edge("generate", "code_quality")
+
+        builder.add_conditional_edges(
+            "code_quality",
+            self._route_after_code_quality,
+            {"execute": "execute", "analyze_failure": "analyze_failure", "review": "review"},
+        )
+        builder.add_conditional_edges(
+            "execute",
+            self._route_after_execute,
+            {"review": "review", "analyze_failure": "analyze_failure"},
+        )
+        builder.add_conditional_edges(
+            "analyze_failure",
+            self._route_after_analysis,
+            {"repair": "repair", "review": "review"},
+        )
+        builder.add_edge("repair", "code_quality")
         builder.add_edge("review", "persist")
         builder.add_edge("persist", END)
         return builder.compile(checkpointer=checkpointer)
@@ -163,6 +181,10 @@ class AgenticTestWorkflow:
     async def _plan_node(self, state: AgentState) -> AgentState:
         result = await _maybe_call(self.planner, state)
         return self._record(state, "plan", {"test_plan": result})
+
+    async def _retrieve_node(self, state: AgentState) -> AgentState:
+        context = await _maybe_call(self.retriever, state)
+        return self._record(state, "retrieve", {"retrieved_context": context})
 
     async def _generate_node(self, state: AgentState) -> AgentState:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
@@ -173,9 +195,47 @@ class AgenticTestWorkflow:
             update["error"] = write_result.error
         return self._record(state, "generate", update, {"write_files": write_result.as_dict()})
 
-    async def _retrieve_node(self, state: AgentState) -> AgentState:
-        context = await _maybe_call(self.retriever, state)
-        return self._record(state, "retrieve", {"retrieved_context": context})
+    async def _code_quality_node(self, state: AgentState) -> AgentState:
+        files = state.get("generated_files", {})
+        req = state.get("requirement", "")
+        target = state.get("target_entrypoint")
+        context = state.get("retrieved_context", [])
+
+        gate_res: CodeQualityGateResult = await self.code_quality_gate.evaluate(
+            generated_files=files,
+            requirement=req,
+            target_entrypoint=target,
+            retrieved_context=context,
+        )
+
+        history_entry = {
+            "round": state.get("repair_round", 0),
+            "status": gate_res.status,
+            "vacuity_score": gate_res.vacuity_score,
+            "grounding_score": gate_res.grounding_score,
+            "violations_count": len(gate_res.hard_violations),
+            "timestamp": time.time(),
+        }
+        cq_history = [*state.get("code_quality_history", []), history_entry]
+
+        update: AgentState = {
+            "code_quality_result": gate_res.as_dict(),
+            "code_quality_history": cq_history,
+            "vacuity_score": gate_res.vacuity_score,
+            "grounding_score": gate_res.grounding_score,
+        }
+
+        # If quality gate rejected and we cannot execute, surface error or diagnostics
+        if gate_res.status == "REJECTED" and not gate_res.allow_execution:
+            update["execution_success"] = False
+            update["execution_result"] = {
+                "passed": False,
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "\n".join(gate_res.repair_feedback),
+            }
+
+        return self._record(state, "code_quality", update)
 
     async def _execute_node(self, state: AgentState) -> AgentState:
         ws = state.get("workspace") or state.get("workspace_dir") or ""
@@ -205,6 +265,12 @@ class AgenticTestWorkflow:
         execution = state.get("execution_result", {})
         output = f"{execution.get('stdout', '')}\n{execution.get('stderr', '')}"
         failed_tests = re.findall(r"(?:FAILED|ERROR)\s+([^\s:]+)", output)
+
+        # Merge code quality repair feedback if present
+        cq_feedback = state.get("code_quality_result", {}).get("repair_feedback", [])
+        if cq_feedback:
+            output += "\n=== CODE QUALITY GATE VIOLATIONS ===\n" + "\n".join(cq_feedback)
+
         analysis = {
             "root_cause": self._classify_failure(output),
             "failed_tests": list(dict.fromkeys(failed_tests)),
@@ -219,7 +285,6 @@ class AgenticTestWorkflow:
         write_result = await self.tools.invoke("write_files", workspace=ws, files=repaired_files)
         round_num = state.get("repair_round", 0) + 1
 
-        # Compute unified diffs for all modified, added, or deleted files
         failure = state.get("failure_analysis", {})
         files_diff = {}
         all_names = set(before_files.keys()) | set(repaired_files.keys())
@@ -264,34 +329,48 @@ class AgenticTestWorkflow:
     async def _review_node(self, state: AgentState) -> AgentState:
         review = await _maybe_call(self.reviewer, state)
         execution = state.get("execution_result", {})
-        verdict = "PASS" if execution.get("passed") else "NEEDS_REVIEW"
+        exec_passed = bool(execution.get("passed", False))
+        cq_res = state.get("code_quality_result", {})
+        cq_status = cq_res.get("status", "PASS")
+        rev_status = review.get("status", "uncertain")
+
+        # Invariant: final PASS requires execution pass AND code quality PASS AND semantic review pass
+        if not exec_passed:
+            exit_code = execution.get("exit_code")
+            verdict = "REJECTED" if exit_code not in (0, None) else "NEEDS_REVIEW"
+        elif cq_status == "REJECTED":
+            verdict = "REJECTED"
+        elif cq_status == "NEEDS_REVIEW":
+            verdict = "NEEDS_REVIEW"
+        elif rev_status == "fail":
+            verdict = "REJECTED"
+        elif rev_status == "uncertain":
+            verdict = "NEEDS_REVIEW"
+        else:
+            verdict = "PASS"
+
         first_execution = state.get("first_execution_result", execution)
-        repair_success = bool(not first_execution.get("passed") and execution.get("passed"))
-        placeholder_files = [
-            name for name, content in state.get("generated_files", {}).items()
-            if "TODO" in content or "FIXME" in content
-        ]
-        if placeholder_files:
-            review.setdefault("issues", []).append({
-                "code": "PLACEHOLDER_CODE",
-                "message": "Generated output still contains TODO/FIXME placeholders.",
-                "files": placeholder_files,
-            })
-            verdict = "REJECTED"
-        if review.get("status") == "fail":
-            verdict = "REJECTED"
+        repair_success = bool(
+            not first_execution.get("passed") and exec_passed and verdict == "PASS"
+        )
+
         update: AgentState = {
-            "review": review, "final_verdict": verdict, "repair_success": repair_success,
+            "review": review,
+            "final_verdict": verdict,
+            "repair_success": repair_success,
         }
+
         if state.get("human_review") and verdict != "PASS" and not state.get("human_decision"):
             decision = interrupt({
                 "task_id": state.get("task_id"),
-                "reason": "Automated review did not produce a PASS verdict.",
+                "reason": f"Automated quality gate did not produce a PASS verdict (current verdict: {verdict}).",
                 "verdict": verdict,
                 "review": review,
+                "code_quality": cq_res,
             })
             update["human_decision"] = str(decision)
             update["final_verdict"] = "MANUAL_APPROVED" if str(decision).lower() == "approve" else "REJECTED"
+
         return self._record(state, "review", update)
 
     async def _persist_node(self, state: AgentState) -> AgentState:
@@ -299,6 +378,16 @@ class AgenticTestWorkflow:
         if state.get("trace_path"):
             TraceRecorder(state["trace_path"]).write_run(updated)
         return updated
+
+    def _route_after_code_quality(self, state: AgentState) -> Literal["execute", "analyze_failure", "review"]:
+        cq_res = state.get("code_quality_result", {})
+        # If code quality permits execution (even with warnings or valid tests), execute
+        if cq_res.get("allow_execution", True):
+            return "execute"
+        # If execution forbidden (e.g. syntax error or only fake tests)
+        if state.get("repair_round", 0) < state.get("max_repair_rounds", 2):
+            return "analyze_failure"
+        return "review"
 
     def _route_after_execute(self, state: AgentState) -> Literal["review", "analyze_failure"]:
         return "review" if state.get("execution_result", {}).get("passed") else "analyze_failure"
@@ -333,6 +422,13 @@ class AgenticTestWorkflow:
             payload["duration_ms"] = exec_res.get("duration_ms", 0.0)
             payload["stdout"] = exec_res.get("stdout", "")
             payload["stderr"] = exec_res.get("stderr", "")
+        elif node == "code_quality":
+            cq_res = new_state.get("code_quality_result", {})
+            payload["status"] = cq_res.get("status")
+            payload["vacuity_score"] = cq_res.get("vacuity_score", 1.0)
+            payload["grounding_score"] = cq_res.get("grounding_score", 1.0)
+            payload["violations"] = cq_res.get("hard_violations", [])
+            payload["unsupported_claims"] = cq_res.get("grounding_findings", [])
         elif node == "generate":
             payload["files"] = list(new_state.get("generated_files", {}).keys())
         elif node == "repair":
@@ -360,7 +456,7 @@ class AgenticTestWorkflow:
 
     @staticmethod
     def _default_planner(state: AgentState) -> dict[str, Any]:
-        return {"goal": state.get("requirement", ""), "steps": ["generate", "execute", "review"]}
+        return {"goal": state.get("requirement", ""), "steps": ["generate", "code_quality", "execute", "review"]}
 
     @staticmethod
     def _default_generator(state: AgentState) -> dict[str, str]:
@@ -403,7 +499,6 @@ class AgenticTestWorkflow:
             task_id=task_id,
         )
         return await asyncio.to_thread(executor.run, command, framework=framework)
-
 
 
 def build_agentic_workflow(**kwargs: Any) -> AgenticTestWorkflow:

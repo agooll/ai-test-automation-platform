@@ -33,3 +33,12 @@ class AgentState(TypedDict, total=False):
     trace_path: str
     error: str | None
 
+    # Stage 4 Quality Gate & Grounding
+    target_entrypoint: str | None
+    code_quality_result: dict[str, Any]
+    code_quality_history: list[dict[str, Any]]
+    vacuity_score: float
+    grounding_score: float
+    grounding_catalog: list[dict[str, Any]]
+    unsupported_claims: list[dict[str, Any]]
+    semantic_quality_result: dict[str, Any]
