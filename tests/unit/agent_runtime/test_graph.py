@@ -8,12 +8,16 @@ from testteller.agent_runtime.graph import AgenticTestWorkflow
 @pytest.mark.asyncio
 async def test_graph_passes_and_records_trace(tmp_path: Path):
     def generator(state):
-        return {"test_ok.py": "def test_ok():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
+        return {
+            "calculator.py": "def compute(x):\n    return x * 2\n",
+            "test_ok.py": "from calculator import compute\n\ndef test_ok():\n    res = compute(21)\n    assert res == 42\n",
+        }
 
     workflow = AgenticTestWorkflow(generator=generator)
     result = await workflow.run({
         "requirement": "Generate a passing smoke test",
         "workspace": str(tmp_path),
+        "target_entrypoint": "calculator.compute",
         "test_command": ["python", "-m", "pytest", "-q"],
         "framework": "pytest",
     })
@@ -33,16 +37,22 @@ async def test_graph_repairs_after_failure(tmp_path: Path):
     attempts = {"count": 0}
 
     def generator(state):
-        return {"test_case.py": "def test_case():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 40\n"}
+        return {
+            "calculator.py": "def compute(x):\n    return x * 2\n",
+            "test_case.py": "from calculator import compute\n\ndef test_case():\n    res = compute(21)\n    assert res == 40\n",
+        }
 
     def repairer(state):
         attempts["count"] += 1
-        return {"test_case.py": "def test_case():\n    def compute(x):\n        return x * 2\n    res = compute(21)\n    assert res == 42\n"}
+        return {
+            "test_case.py": "from calculator import compute\n\ndef test_case():\n    res = compute(21)\n    assert res == 42\n",
+        }
 
     workflow = AgenticTestWorkflow(generator=generator, repairer=repairer)
     result = await workflow.run({
         "requirement": "Generate and validate a smoke test",
         "workspace": str(tmp_path),
+        "target_entrypoint": "calculator.compute",
         "test_command": ["python", "-m", "pytest", "-q"],
         "framework": "pytest",
         "max_repair_rounds": 2,

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .code_models import (
@@ -130,8 +132,6 @@ class AutomationCodeQualityGate:
             if not file_path.endswith(".py"):
                 continue
 
-            test_files_found += 1
-
             # 1. Syntax check
             tree, syntax_err = check_syntax_and_parse(code, file_path)
             if syntax_err:
@@ -142,25 +142,59 @@ class AutomationCodeQualityGate:
             placeholders = check_placeholders(code, file_path)
             hard_violations.extend(placeholders)
 
-            # 3. Test functions & dependency analysis
-            analyses = analyze_test_module(code, target_entrypoint=target_entrypoint)
-            total_tests += len(analyses)
-
-            # 4. Anti-counterfeit rule validation
-            rule_violations = validate_test_functions(
-                analyses=analyses,
-                file_path=file_path,
-                target_entrypoint=target_entrypoint,
+            # Check if this file is a test file (e.g. test_*.py, *_test.py, or inside tests/)
+            p = Path(file_path)
+            norm_parts = p.parts
+            is_test_file = (
+                p.name != "conftest.py"
+                and (p.name.startswith("test_") or p.name.endswith("_test.py") or "tests" in norm_parts or "test" in norm_parts)
             )
-            hard_violations.extend(rule_violations)
 
-            # 5. Extract claims for grounding analysis
-            claim_extractor = CodeClaimExtractor(
-                file_path=file_path,
-                target_entrypoint=target_entrypoint,
-            )
-            claim_extractor.visit(tree)
-            all_claims.extend(claim_extractor.claims)
+            if is_test_file:
+                test_files_found += 1
+
+                # 3. Test functions & dependency analysis
+                analyses = analyze_test_module(code, target_entrypoint=target_entrypoint)
+                total_tests += len(analyses)
+
+                # 4. Anti-counterfeit rule validation
+                rule_violations = validate_test_functions(
+                    analyses=analyses,
+                    file_path=file_path,
+                    target_entrypoint=target_entrypoint,
+                )
+                hard_violations.extend(rule_violations)
+
+                # 5. Extract claims for grounding analysis
+                claim_extractor = CodeClaimExtractor(
+                    file_path=file_path,
+                    target_entrypoint=target_entrypoint,
+                )
+                claim_extractor.visit(tree)
+                all_claims.extend(claim_extractor.claims)
+            else:
+                # Source or support file: register defined symbols into catalog
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        mod_stem = p.stem
+                        catalog.add_item(
+                            EvidenceItem(
+                                evidence_id=f"SYM-SRC-{mod_stem}.{node.name}",
+                                kind="target_symbol",
+                                value=f"{mod_stem}.{node.name}",
+                                source=file_path,
+                                confidence=1.0,
+                            )
+                        )
+                        catalog.add_item(
+                            EvidenceItem(
+                                evidence_id=f"SYM-SRC-SHORT-{node.name}",
+                                kind="target_symbol",
+                                value=node.name,
+                                source=file_path,
+                                confidence=1.0,
+                            )
+                        )
 
         if test_files_found == 0:
             hard_violations.append(
@@ -169,7 +203,7 @@ class AutomationCodeQualityGate:
                     file_path="workspace",
                     message="No Python (.py) test files found among generated files.",
                     severity="error",
-                    suggestion="Generate at least one Python test file.",
+                    suggestion="Generate at least one Python test file prefixed with 'test_'.",
                 )
             )
 
@@ -218,21 +252,27 @@ class AutomationCodeQualityGate:
 
         has_errors = any(v.severity == "error" for v in hard_violations)
         has_unknown_business_claims = any(
-            f.status == "UNKNOWN" and f.claim_type in ("api_endpoint", "target_symbol", "ui_selector")
+            f.status == "UNKNOWN" and f.claim_type in ("api_endpoint", "target_symbol", "ui_selector", "model_field")
             for f in grounding_findings
         )
+        missing_target = not target_entrypoint
 
         if has_errors:
             status = "REJECTED"
             allow_execution = False
             allow_final_pass = False
-        elif has_unknown_business_claims:
+        elif has_unknown_business_claims or missing_target:
             status = "NEEDS_REVIEW"
             allow_execution = True
             allow_final_pass = False
-            repair_feedback.append(
-                "- [NEEDS_REVIEW] Test code contains unverified business claims (API/UI/symbols) that lack authoritative project evidence."
-            )
+            if has_unknown_business_claims:
+                repair_feedback.append(
+                    "- [NEEDS_REVIEW] Test code contains unverified business claims (API/UI/symbols/fields) that lack authoritative project evidence."
+                )
+            if missing_target:
+                repair_feedback.append(
+                    "- [NEEDS_REVIEW] Target identity (target_entrypoint) is missing or cannot be verified. SUT interaction cannot be validated deterministically."
+                )
         else:
             status = "PASS"
             allow_execution = True

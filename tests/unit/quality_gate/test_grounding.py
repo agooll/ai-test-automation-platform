@@ -340,6 +340,12 @@ def test_magic():
                     value="POST /api/auth/login",
                     source="src/auth.py",
                 ),
+                EvidenceItem(
+                    evidence_id="E-FLD-1",
+                    kind="model_field",
+                    value="email",
+                    source="src/auth.py",
+                ),
             ]
         )
 
@@ -353,6 +359,7 @@ def test_valid_login():
         gate = AutomationCodeQualityGate()
         res = await gate.evaluate(
             generated_files={"tests/test_auth.py": test_code},
+            target_entrypoint="auth_api",
             evidence_catalog=catalog,
         )
 
@@ -360,3 +367,34 @@ def test_valid_login():
         assert res.allow_final_pass is True
         assert res.grounding_score == 1.0
         assert len(res.hard_violations) == 0
+
+    async def test_gate_needs_review_when_model_field_is_unknown(self):
+        catalog = EvidenceCatalog(
+            [
+                EvidenceItem(
+                    evidence_id="E-API-1",
+                    kind="api_endpoint",
+                    value="POST /api/auth/login",
+                    source="src/auth.py",
+                ),
+            ]
+        )
+
+        # "email" is not in catalog -> UNKNOWN model_field
+        test_code = """
+import requests
+
+def test_valid_login():
+    resp = requests.post("/api/auth/login", json={"email": "a@b.com"})
+    assert resp.status_code == 200
+"""
+        gate = AutomationCodeQualityGate()
+        res = await gate.evaluate(
+            generated_files={"tests/test_auth.py": test_code},
+            target_entrypoint="auth_api",
+            evidence_catalog=catalog,
+        )
+
+        assert res.status == "NEEDS_REVIEW"
+        assert res.allow_final_pass is False
+        assert any(f.status == "UNKNOWN" and f.claim_type == "model_field" for f in res.grounding_findings)

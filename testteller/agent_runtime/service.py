@@ -40,6 +40,7 @@ class AgentRunConfig:
     event_sink: Optional[EventSink] = None
     execution_backend: str = "auto"
     sandbox_policy: Optional[Any] = None
+    target_entrypoint: Optional[str] = None
 
 
 
@@ -114,6 +115,21 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         execution_backend=config.execution_backend,
         sandbox_policy=config.sandbox_policy,
     )
+    target_entrypoint = config.target_entrypoint
+    if not target_entrypoint and test_cases:
+        for tc in test_cases:
+            if tc.technical_contract and tc.technical_contract.get("target_entrypoint"):
+                target_entrypoint = tc.technical_contract["target_entrypoint"]
+                break
+            elif tc.references and tc.references.get("target_entrypoint"):
+                target_entrypoint = tc.references["target_entrypoint"]
+                break
+            elif tc.references and tc.references.get("target"):
+                target_entrypoint = tc.references["target"]
+                break
+            elif tc.technical_area and "." in tc.technical_area:
+                target_entrypoint = tc.technical_area
+                break
 
     initial_state: AgentState = {
         "task_id": task_id,
@@ -127,6 +143,7 @@ async def prepare_agent_run(config: AgentRunConfig) -> PreparedAgentRun:
         "human_review": config.human_review,
         "repair_history": [],
         "execution_backend": config.execution_backend,
+        "target_entrypoint": target_entrypoint,
     }
 
 

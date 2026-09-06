@@ -78,19 +78,18 @@ class ExistingRAGAdapter:
                 return results
             elif hasattr(vs, "query_collection"):
                 res = await vs.query_collection(query, n_results=self.generator.num_context_docs)
-                return [
-                    {
+                for item in res:
+                    results.append({
                         "id": item.get("id"),
                         "content": item.get("document", item.get("content", "")),
                         "metadata": item.get("metadata", {}),
                         "distance": item.get("distance"),
                         "source": item.get("metadata", {}).get("source") or item.get("metadata", {}).get("file_path"),
-                    }
-                    for item in res
-                ]
+                    })
+                return results
         except Exception:
             pass
-        return []
+        return results
 
     async def generate(self, state: AgentState) -> dict[str, str]:
         try:

@@ -91,11 +91,17 @@ def _is_disallowed_as_sut(name: str) -> bool:
 class FunctionAstVisitor(ast.NodeVisitor):
     """Detailed AST analyzer for an individual test function with fail-closed SUT tracking."""
 
-    def __init__(self, func_node: ast.FunctionDef | ast.AsyncFunctionDef, target_entrypoint: Optional[str] = None):
+    def __init__(
+        self,
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+        target_entrypoint: Optional[str] = None,
+        local_definitions: Optional[Set[str]] = None,
+    ):
         self.func_node = func_node
         self.target_entrypoint = target_entrypoint
         self.target_leaf = _get_target_symbol_leaf(target_entrypoint)
         self.target_full = target_entrypoint.strip() if target_entrypoint else None
+        self.local_definitions: Set[str] = set(local_definitions or ())
         self.analysis = TestFunctionAnalysis(
             name=func_node.name,
             line_number=func_node.lineno,
@@ -205,14 +211,37 @@ class FunctionAstVisitor(ast.NodeVisitor):
         if is_mock:
             return False, True, func_name
 
-        # 2. Check if disallowed stdlib or builtin (e.g. time.time(), random.random())
+        # 2. Check if local test helper function or fixture defined in test module
+        if func_name in self.local_definitions:
+            return False, False, func_name
+
+        # 3. Check if disallowed stdlib or builtin (e.g. time.time(), random.random())
         if _is_disallowed_as_sut(func_name):
             # Builtins/stdlib are NEVER SUT by themselves
             return False, False, func_name
 
-        # 3. If target_entrypoint is provided: FAIL-CLOSED
+        # 4. Check if HTTP API client or UI browser interaction
+        if isinstance(call.func, ast.Attribute):
+            attr_name = call.func.attr
+            base_name = self._get_call_name(call.func.value)
+            if attr_name in ("get", "post", "put", "delete", "patch", "options", "head", "request"):
+                if (
+                    base_name in ("requests", "httpx", "aiohttp", "client", "test_client", "api_client", "session", "http_client", "app")
+                    or base_name.endswith("client")
+                    or base_name.endswith("session")
+                ):
+                    return True, False, func_name
+            elif attr_name in ("goto", "click", "fill", "locator", "get_by_role", "get_by_text", "wait_for_selector", "find_element"):
+                if (
+                    base_name in ("page", "browser", "driver", "context")
+                    or base_name.endswith("page")
+                    or base_name.endswith("driver")
+                ):
+                    return True, False, func_name
+
+        # 5. If target_entrypoint is provided: FAIL-CLOSED
         if self.target_leaf:
-            # Case 3a: Direct call/instantiation of target symbol (e.g. LRUCache(10))
+            # Case 5a: Direct call/instantiation of target symbol (e.g. LRUCache(10))
             if (
                 func_name == self.target_leaf
                 or func_name == self.target_full
@@ -220,7 +249,7 @@ class FunctionAstVisitor(ast.NodeVisitor):
             ):
                 return True, False, func_name
 
-            # Case 3b: Method call on an SUT instance (e.g. cache.get(...), cache.popitem())
+            # Case 4b: Method call on an SUT instance (e.g. cache.get(...), cache.popitem())
             if isinstance(call.func, ast.Attribute):
                 recv = call.func.value
                 if isinstance(recv, ast.Name) and recv.id in self._sut_instances:
@@ -228,21 +257,22 @@ class FunctionAstVisitor(ast.NodeVisitor):
                 elif isinstance(recv, ast.Attribute) and getattr(recv, "attr", "") in self._sut_instances:
                     return True, False, func_name
 
-            # Case 3c: SUT instance passed as primary argument to an inspected function
+            # Case 4c: SUT instance passed as primary argument to an inspected function
             if any(name in self._sut_instances for name in self._extract_names(call)):
                 return True, False, func_name
 
             # FAIL-CLOSED: Any other function call (e.g. time.time(), unrelated helper) is NOT SUT!
             return False, False, func_name
 
-        # 4. If target_entrypoint is NOT provided (fallback mode):
-        # Allow user/project functions and SUT instance method calls
+        # 5. If target_entrypoint is NOT provided (fallback mode):
+        # We cannot identify SUT. Unrelated helpers/functions are NOT SUT!
         if isinstance(call.func, ast.Attribute):
             recv = call.func.value
             if isinstance(recv, ast.Name) and recv.id in self._sut_instances:
                 return True, False, func_name
 
-        return True, False, func_name
+        # Without target identity, arbitrary functions or helpers are NOT SUT!
+        return False, False, func_name
 
     def _handle_assignment(self, stmt: ast.Assign | ast.AnnAssign) -> None:
         targets: List[str] = []
@@ -476,11 +506,20 @@ def analyze_test_module(code: str, target_entrypoint: Optional[str] = None) -> L
     except SyntaxError:
         return []
 
+    local_definitions: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local_definitions.add(node.name)
+
     results: List[TestFunctionAnalysis] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_") or node.name.startswith("test"):
-                visitor = FunctionAstVisitor(node, target_entrypoint=target_entrypoint)
+                visitor = FunctionAstVisitor(
+                    node,
+                    target_entrypoint=target_entrypoint,
+                    local_definitions=local_definitions,
+                )
                 analysis = visitor.analyze()
                 results.append(analysis)
     return results
