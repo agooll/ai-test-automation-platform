@@ -62,9 +62,12 @@ class AgentState(TypedDict, total=False):
     grounded_claim_rate: float
     provenance_completeness: bool
     citation_accuracy: float
+    citation_coverage: float
     grounding_manifest: dict[str, Any]
     grounding_history: list[dict[str, Any]]
     repair_plan: dict[str, Any]
     repair_rejected: bool
     evidence_db_path: str | None
+    source_manifests: list[dict[str, Any]]
+    source_chunks: list[dict[str, Any]]
 

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from testteller.core.evidence.catalog import EvidenceCatalog2
+from testteller.core.evidence.models import EvidenceRecord, TrustLevel
 from testteller.core.retrieval.query_planner import GroundingQuery
 
 logger = logging.getLogger(__name__)
@@ -106,3 +108,128 @@ class RepairGroundingPlanner:
                 return plan
 
         return plan
+
+
+class ASTExpectationExtractor:
+    """
+    Extracts deterministic expectation fingerprints from test AST without brittle regexes.
+    Detects modifications to status codes, return values, exception types, and assertions.
+    """
+
+    @classmethod
+    def extract_expectations(cls, code: str) -> dict[str, set[str]]:
+        """
+        Extract normalized (target -> set of expected values) from Python test AST.
+        """
+        try:
+            tree = ast.parse(code)
+        except Exception:
+            return {}
+
+        expectations: dict[str, set[str]] = {}
+
+        def add_exp(target: str, val: str):
+            t = target.strip()
+            v = val.strip().strip("\"'")
+            if t and v:
+                expectations.setdefault(t, set()).add(v)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assert):
+                test = node.test
+                if isinstance(test, ast.Compare):
+                    left_norm = cls._normalize_expr(test.left)
+                    for op, comp in zip(test.ops, test.comparators):
+                        if isinstance(op, ast.Eq):
+                            comp_str = ast.unparse(comp) if hasattr(ast, "unparse") else ""
+                            add_exp(left_norm, comp_str)
+                elif isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                    operand_str = cls._normalize_expr(test.operand)
+                    add_exp(operand_str, "False")
+                elif isinstance(test, (ast.Call, ast.Name, ast.Attribute)):
+                    expr_str = cls._normalize_expr(test)
+                    add_exp(expr_str, "True")
+
+            elif isinstance(node, ast.With):
+                for item in node.items:
+                    expr = item.context_expr
+                    if isinstance(expr, ast.Call):
+                        func_str = ast.unparse(expr.func) if hasattr(ast, "unparse") else ""
+                        if "pytest.raises" in func_str and expr.args:
+                            arg_str = ast.unparse(expr.args[0]) if hasattr(ast, "unparse") else ""
+                            add_exp("pytest.raises", arg_str)
+
+            elif isinstance(node, ast.Call):
+                func_str = ast.unparse(node.func) if hasattr(ast, "unparse") else ""
+                if func_str.endswith(".assertEqual") and len(node.args) >= 2:
+                    left_str = cls._normalize_expr(node.args[0])
+                    right_str = ast.unparse(node.args[1]) if hasattr(ast, "unparse") else ""
+                    add_exp(left_str, right_str)
+                elif func_str.endswith(".assertRaises") and len(node.args) >= 1:
+                    exc_str = ast.unparse(node.args[0]) if hasattr(ast, "unparse") else ""
+                    add_exp("pytest.raises", exc_str)
+
+        return expectations
+
+    @classmethod
+    def _normalize_expr(cls, node: ast.AST) -> str:
+        if isinstance(node, ast.Attribute):
+            if node.attr in ("status_code", "status"):
+                return "status_code"
+            return f"*.{node.attr}"
+        if isinstance(node, ast.Subscript):
+            slice_str = ast.unparse(node.slice) if hasattr(ast, "unparse") else ""
+            return f"*[{slice_str}]"
+        return ast.unparse(node) if hasattr(ast, "unparse") else ""
+
+    @classmethod
+    def find_unbacked_expectation_changes(
+        cls,
+        before_code: str,
+        proposed_code: str,
+        catalog_records: list[EvidenceRecord],
+    ) -> list[str]:
+        """
+        Compare before_code and proposed_code AST expectation fingerprints.
+        Any modified or newly altered expectation that lacks authoritative evidence
+        is returned as an unbacked violation.
+        """
+        before_exp = cls.extract_expectations(before_code)
+        after_exp = cls.extract_expectations(proposed_code)
+
+        unbacked: list[str] = []
+
+        for target, after_vals in after_exp.items():
+            before_vals = before_exp.get(target, set())
+            new_vals = after_vals - before_vals
+            if new_vals and before_vals:
+                for val in new_vals:
+                    has_auth = False
+                    for ev in catalog_records:
+                        trust = getattr(ev, "trust_level", None)
+                        is_auth = (
+                            trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG)
+                            or getattr(trust, "is_authoritative", False)
+                        )
+                        if is_auth:
+                            ev_val = str(getattr(ev, "value", ""))
+                            meta_str = str(getattr(ev, "metadata", {}))
+                            if target == "status_code":
+                                if (
+                                    f"status_code {val}" in ev_val
+                                    or f"-> {val}" in ev_val
+                                    or ev_val.endswith(f" {val}")
+                                    or f"'{val}'" in meta_str
+                                    or f": {val}" in meta_str
+                                ):
+                                    has_auth = True
+                                    break
+                            else:
+                                if val in ev_val or val in meta_str:
+                                    has_auth = True
+                                    break
+                    if not has_auth:
+                        unbacked.append(f"Expectation for '{target}' modified to '{val}' without authoritative evidence")
+
+        return unbacked
+

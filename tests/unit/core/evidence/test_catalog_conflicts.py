@@ -215,3 +215,30 @@ def test_evidence_catalog_builder_assembly():
     assert bundle.coverage_score == 0.5
     assert len(bundle.missing_required_evidence) == 1
 
+
+@pytest.mark.unit
+def test_evidence_catalog_builder_missing_provenance_fails_closed():
+    """When metadata lacks commit, chunk, hash, line, or source, provenance_complete MUST be False."""
+    resolver = ConflictResolver()
+    builder = EvidenceCatalogBuilder(conflict_resolver=resolver)
+
+
+    # Missing commit_sha and content_hash
+    ev_missing = EvidenceRecord(
+        evidence_id="EV-NO-COMMIT",
+        kind="target_symbol",
+        value="AuthService.login",
+        source_id="SRC-1",
+        source_path="auth.py",
+        source_chunk_id="CHK-1",
+        line_start=10,
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+
+    bundle = builder.build_bundle(extracted_records=[ev_missing])
+    assert bundle.provenance_complete is False
+    assert not bundle.evidence[0].commit_sha  # Zero synthetic attribution!
+
+
+

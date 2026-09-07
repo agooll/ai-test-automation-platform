@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from testteller.core.evidence.catalog import EvidenceCatalog2
+from testteller.core.evidence.ids import normalize_evidence_value
 from testteller.core.evidence.models import EvidenceRecord, TrustLevel
 from testteller.quality_gate.code_models import (
     ClaimItem,
@@ -41,7 +42,9 @@ class ClaimBindingResult(BaseModel):
     bindings: List[ClaimEvidenceBinding] = Field(default_factory=list)
     grounded_claim_rate: float = 1.0
     citation_accuracy: float = 1.0
+    citation_coverage: float = 1.0
     unsupported_claims: List[ClaimEvidenceBinding] = Field(default_factory=list)
+
     unknown_claims: List[ClaimEvidenceBinding] = Field(default_factory=list)
     has_blocking_violations: bool = False
     violations: List[CodeViolation] = Field(default_factory=list)
@@ -114,16 +117,30 @@ class ClaimEvidenceBinder:
                 chunk_id = getattr(match, "source_chunk_id", "CHK-UNKNOWN")
                 commit_sha = getattr(match, "commit_sha", "")
 
+                matched_ev_ids = [ev_id]
                 used_evidence_set.add(ev_id)
+                for alias in getattr(match, "metadata", {}).get("aliases", []):
+                    if alias not in matched_ev_ids:
+                        matched_ev_ids.append(alias)
+                    used_evidence_set.add(alias)
+                for cid in (claimed_citations or []):
+                    cev = catalog.get_by_id(cid) if hasattr(catalog, "get_by_id") else None
+                    if cev and cev.kind == claim.kind and normalize_evidence_value(cev.kind, cev.value) == normalize_evidence_value(claim.kind, claim.value):
+                        c_trust = getattr(cev, "trust_level", None)
+                        if c_trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG) or getattr(c_trust, "is_authoritative", False):
+                            if cid not in matched_ev_ids:
+                                matched_ev_ids.append(cid)
+                            used_evidence_set.add(cid)
+
                 claim.status = "SUPPORTED"
-                claim.matched_evidence_id = ev_id
+                claim.matched_evidence_id = matched_ev_ids[0]
 
                 binding = ClaimEvidenceBinding(
                     claim_id=claim.claim_id,
                     kind=claim.kind,
                     value=claim.value,
                     status="SUPPORTED",
-                    evidence_ids=[ev_id],
+                    evidence_ids=matched_ev_ids,
                     citation_valid=True,
                     source_file=claim.file_path,
                     line_number=claim.line_number,
@@ -260,8 +277,7 @@ class ClaimEvidenceBinder:
                         )
                     )
 
-        # 3. Citation validation
-        citation_accuracy = 1.0
+        # 3. Citation validation & Citation coverage
         if claimed_citations:
             valid_citations = 0
             for cid in claimed_citations:
@@ -295,10 +311,24 @@ class ClaimEvidenceBinder:
                     valid_citations += 1
             citation_accuracy = round(valid_citations / len(claimed_citations), 4)
 
+            cited_bindings = sum(1 for b in bindings if any(cid in claimed_citations for cid in b.evidence_ids))
+            citation_coverage = round(cited_bindings / len(bindings), 4) if bindings else 1.0
+        else:
+            if claimed_citations is None:
+                citation_accuracy = 1.0
+                citation_coverage = 1.0
+            elif bindings:
+                citation_accuracy = 0.0
+                citation_coverage = 0.0
+            else:
+                citation_accuracy = 1.0
+                citation_coverage = 1.0
+
         # 4. Rates & Summary
         supported_count = sum(1 for b in bindings if b.status == "SUPPORTED")
         grounded_rate = round(supported_count / len(bindings), 4)
         has_blocking = len(violations) > 0
+
 
         # 5. Build grounding manifest
         manifest = {
@@ -318,13 +348,16 @@ class ClaimEvidenceBinder:
             ],
             "grounded_claim_rate": grounded_rate,
             "citation_accuracy": citation_accuracy,
+            "citation_coverage": citation_coverage,
         }
 
         return ClaimBindingResult(
             bindings=bindings,
             grounded_claim_rate=grounded_rate,
             citation_accuracy=citation_accuracy,
+            citation_coverage=citation_coverage,
             unsupported_claims=unsupported_bindings,
+
             unknown_claims=unknown_bindings,
             has_blocking_violations=has_blocking,
             violations=violations,

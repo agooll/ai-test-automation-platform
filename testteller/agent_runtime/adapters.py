@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ..automator_agent.rag_enhanced_generator import RAGEnhancedTestGenerator
 from ..automator_agent.parser.markdown_parser import TestCase
@@ -44,20 +48,79 @@ class ExistingRAGAdapter:
         results: list[dict[str, Any]] = []
 
         # 1. Extract verified application context and canonical evidence items
+        ws = state.get("workspace") or state.get("workspace_dir") or state.get("target_repo") or ""
+        pinned_commit = state.get("pinned_commit") or ""
         try:
             app_context = await asyncio.to_thread(
                 self.generator.knowledge_extractor.extract_app_context, self.test_cases
             )
             for ev in app_context.to_evidence_items():
+                is_canonical = False
+                c_hash = ""
+                line_s = 1
+                line_e = 1
+                src_chunk_id = f"chk_{ev.evidence_id}"
+                src_id = f"src_{ev.source}" if ev.source else ""
+                commit_sha = pinned_commit
+
+                if ws and ev.source and not ev.source.startswith("discovered:") and ev.source != "unknown":
+                    source_file = Path(ws) / ev.source
+                    if not source_file.is_file() and Path(ev.source).is_file():
+                        source_file = Path(ev.source)
+                    if source_file.is_file():
+                        try:
+                            content = source_file.read_text(encoding="utf-8", errors="replace")
+                            import hashlib
+                            c_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+                            for idx, line in enumerate(content.splitlines(), start=1):
+                                if ev.value in line or (ev.kind == "api_endpoint" and ev.value.split()[-1] in line):
+                                    line_s = idx
+                                    line_e = idx
+                                    break
+                            if not commit_sha:
+                                try:
+                                    import subprocess
+                                    c_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(source_file.parent), capture_output=True, text=True, timeout=2)
+                                    if c_res.returncode == 0 and c_res.stdout.strip():
+                                        commit_sha = c_res.stdout.strip()
+                                except Exception:
+                                    pass
+                            if commit_sha and c_hash:
+                                is_canonical = True
+                                src_chunk_id = f"chk_{src_id}_{line_s}_{c_hash[:8]}"
+                        except Exception:
+                            pass
+
+                trust_lvl = "T1_STRONG" if is_canonical else "T2_SUPPORTING"
+                meta = {
+                    "source": ev.source,
+                    "source_path": ev.source,
+                    "type": "evidence",
+                    "kind": ev.kind,
+                    "trust_level": trust_lvl,
+                    "source_id": src_id,
+                    "source_chunk_id": src_chunk_id,
+                    "line_start": line_s,
+                    "line_end": line_e,
+                    "commit_sha": commit_sha,
+                    "content_hash": c_hash,
+                }
                 results.append({
                     "id": ev.evidence_id,
                     "evidence_id": ev.evidence_id,
                     "kind": ev.kind,
                     "value": ev.value,
                     "source": ev.source,
+                    "source_path": ev.source,
+                    "source_id": src_id,
+                    "source_chunk_id": src_chunk_id,
+                    "line_start": line_s,
+                    "line_end": line_e,
+                    "commit_sha": commit_sha,
+                    "content_hash": c_hash,
                     "confidence": ev.confidence,
                     "content": f"Verified {ev.kind}: {ev.value} (Source: {ev.source})",
-                    "metadata": {"source": ev.source, "type": "evidence", "kind": ev.kind, "trust_level": "T1_STRONG"},
+                    "metadata": meta,
                 })
                 if ev.source and ev.source.endswith(".py"):
                     mod_name = ev.source[:-3].replace("/", ".").replace("\\", ".")
@@ -67,12 +130,20 @@ class ExistingRAGAdapter:
                         "kind": "target_symbol",
                         "value": mod_name,
                         "source": ev.source,
+                        "source_path": ev.source,
+                        "source_id": src_id,
+                        "source_chunk_id": src_chunk_id,
+                        "line_start": line_s,
+                        "line_end": line_e,
+                        "commit_sha": commit_sha,
+                        "content_hash": c_hash,
                         "confidence": ev.confidence,
                         "content": f"Verified target_symbol: {mod_name} (Source: {ev.source})",
-                        "metadata": {"source": ev.source, "type": "evidence", "kind": "target_symbol", "trust_level": "T1_STRONG"},
+                        "metadata": {**meta, "kind": "target_symbol"},
                     })
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.warning("Error in ExistingRAGAdapter.retrieve app_context: %s", ex, exc_info=True)
+
 
         # 2. Execute GroundingQueryPlan using HybridRetriever if available
         plan_data = state.get("grounding_query_plan")
@@ -182,9 +253,14 @@ class ExistingRAGAdapter:
         ev_summary = "\n".join(evidence_summary_lines) if evidence_summary_lines else ""
         if ev_summary:
             for tc in self.test_cases:
-                desc = tc.description or ""
-                if "CANONICAL EVIDENCE BUNDLE" not in desc:
-                    tc.description = desc + f"\n\nCANONICAL EVIDENCE BUNDLE (You MUST cite these using # @cite <evidence_id>):\n{ev_summary}"
+                if hasattr(tc, "objective"):
+                    obj = tc.objective or ""
+                    if "CANONICAL EVIDENCE BUNDLE" not in obj:
+                        tc.objective = obj + f"\n\nCANONICAL EVIDENCE BUNDLE (Cite with # @cite <evidence_id>):\n{ev_summary}"
+                elif hasattr(tc, "description"):
+                    desc = getattr(tc, "description", "") or ""
+                    if "CANONICAL EVIDENCE BUNDLE" not in desc:
+                        tc.description = desc + f"\n\nCANONICAL EVIDENCE BUNDLE (Cite with # @cite <evidence_id>):\n{ev_summary}"
 
         try:
             files = await self.generator.generate(self.test_cases)
@@ -202,14 +278,7 @@ class ExistingRAGAdapter:
             else:
                 mapped[k] = v
 
-        # If fallback generated code doesn't contain citations but we have valid evidence, inject citations
-        if valid_ev_ids:
-            cite_header = " ".join(f"# @cite {eid}" for eid in sorted(valid_ev_ids)[:3])
-            for path, code in list(mapped.items()):
-                if "# @cite" not in code and cite_header:
-                    mapped[path] = f"{cite_header}\n{code}"
-
-        # Extract and verify citations from generated files
+        # Extract and verify citations from generated files (NO automatic citation injection!)
         used_ids = []
         for code in mapped.values():
             found = re.findall(r"#\s*@cite\s+([A-Za-z0-9_\-]+)", code)

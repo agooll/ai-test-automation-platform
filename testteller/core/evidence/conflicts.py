@@ -49,10 +49,19 @@ class ConflictResolver:
             if len(unique_values) == 1:
                 # Deduplicate identical records, keep the one with highest authority
                 best = group[0]
+                aliases = list(best.metadata.get("aliases", []))
                 for other in group[1:]:
                     winner = resolve_authority_winner(best, other, self.pinned_commit)
-                    if winner:
-                        best = winner
+                    if winner is best:
+                        aliases.append(other.evidence_id)
+                        aliases.extend(other.metadata.get("aliases", []))
+                    else:
+                        aliases.append(best.evidence_id)
+                        aliases.extend(best.metadata.get("aliases", []))
+                        if winner:
+                            best = winner
+                if aliases:
+                    best.metadata["aliases"] = list(dict.fromkeys(aliases))
                 retained.append(best)
                 continue
 

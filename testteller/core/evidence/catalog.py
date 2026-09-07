@@ -36,6 +36,8 @@ class EvidenceCatalog2:
     def add_record(self, record: EvidenceRecord) -> None:
         """Register an evidence record into catalog and update internal indexes."""
         self._records_by_id[record.evidence_id] = record
+        for alias in record.metadata.get("aliases", []):
+            self._records_by_id.setdefault(alias, record)
         if record.kind not in self._records_by_kind:
             self._records_by_kind[record.kind] = []
         self._records_by_kind[record.kind].append(record)

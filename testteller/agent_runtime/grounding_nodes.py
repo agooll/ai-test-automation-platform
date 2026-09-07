@@ -8,11 +8,18 @@ from pathlib import Path
 
 from testteller.core.evidence.catalog import EvidenceCatalog2
 from testteller.core.evidence.catalog_builder import EvidenceCatalogBuilder
+from testteller.core.evidence.chunking import LineAwareChunker
 from testteller.core.evidence.extractors import (
     OpenAPIEvidenceExtractor,
     PythonASTEvidenceExtractor,
 )
-from testteller.core.evidence.models import EvidenceRecord
+from testteller.core.evidence.ids import (
+    compute_chunk_id,
+    compute_content_hash,
+    compute_source_id,
+    normalize_relative_path,
+)
+from testteller.core.evidence.models import EvidenceRecord, SourceChunk, SourceManifest
 from testteller.core.retrieval.query_planner import GroundingQueryPlanner
 from testteller.quality_gate.claim_binding import ClaimEvidenceBinder
 from testteller.quality_gate.grounding import CodeClaimExtractor
@@ -104,7 +111,11 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    # 1. AST extraction if target_repo exists
+    native_manifests: List[SourceManifest] = []
+    native_chunks: List[SourceChunk] = []
+    chunker = LineAwareChunker()
+
+    # 1. Native Ingestion & AST extraction if target_repo exists
     if target_repo and Path(target_repo).exists():
         ast_extractor = PythonASTEvidenceExtractor()
         repo_path = Path(target_repo)
@@ -113,27 +124,74 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
             if any(part.startswith((".", "venv", "build", "tests")) for part in py_file.parts):
                 continue
             try:
-                extracted.extend(
-                    ast_extractor.extract_from_file(
-                        py_file,
-                        commit_sha=pinned_commit,
-                    )
+                content = py_file.read_text(encoding="utf-8", errors="replace")
+                rel_path = normalize_relative_path(str(py_file.relative_to(repo_path)))
+                source_id = compute_source_id(str(repo_path), pinned_commit, rel_path)
+                f_hash = compute_content_hash(content)
+                manifest = SourceManifest(
+                    source_id=source_id,
+                    repository=str(repo_path),
+                    commit_sha=pinned_commit,
+                    path=rel_path,
+                    file_type="python",
+                    content_hash=f_hash,
                 )
-            except Exception:
-                pass
+                native_manifests.append(manifest)
+                f_chunks = chunker.chunk_text(content, source_id=source_id, file_type="python")
+                native_chunks.extend(f_chunks)
+
+                file_records = ast_extractor.extract_from_code(
+                    code=content,
+                    file_path=rel_path,
+                    repository=str(repo_path),
+                    commit_sha=pinned_commit,
+                )
+                extracted.extend(file_records)
+                for rec in file_records:
+                    if rec.source_chunk_id and not any(c.chunk_id == rec.source_chunk_id for c in native_chunks):
+                        c_lines = content.splitlines(keepends=True)[rec.line_start - 1 : rec.line_end] if (rec.line_start and rec.line_end) else []
+                        c_text = "".join(c_lines) or rec.value
+                        native_chunks.append(
+                            SourceChunk(
+                                chunk_id=rec.source_chunk_id,
+                                source_id=source_id,
+                                text=c_text,
+                                line_start=rec.line_start or 1,
+                                line_end=rec.line_end or 1,
+                                content_hash=rec.content_hash,
+                            )
+                        )
+            except Exception as ex:
+                logger.debug("Failed extracting from %s: %s", py_file, ex)
 
         # Scan for OpenAPI JSON/YAML specs
         openapi_extractor = OpenAPIEvidenceExtractor()
         for spec_file in list(repo_path.glob("**/openapi.yaml")) + list(repo_path.glob("**/openapi.json")) + list(repo_path.glob("**/openapi.yml")):
             try:
-                extracted.extend(
-                    openapi_extractor.extract_from_file(
-                        spec_file,
-                        commit_sha=pinned_commit,
-                    )
+                content = spec_file.read_text(encoding="utf-8", errors="replace")
+                rel_path = normalize_relative_path(str(spec_file.relative_to(repo_path)))
+                source_id = compute_source_id(str(repo_path), pinned_commit, rel_path)
+                f_hash = compute_content_hash(content)
+                f_type = spec_file.suffix.lstrip(".") or "yaml"
+                manifest = SourceManifest(
+                    source_id=source_id,
+                    repository=str(repo_path),
+                    commit_sha=pinned_commit,
+                    path=rel_path,
+                    file_type=f_type,
+                    content_hash=f_hash,
                 )
-            except Exception:
-                pass
+                native_manifests.append(manifest)
+                f_chunks = chunker.chunk_text(content, source_id=source_id, file_type="text")
+                native_chunks.extend(f_chunks)
+
+                spec_records = openapi_extractor.extract_from_file(
+                    spec_file,
+                    commit_sha=pinned_commit,
+                )
+                extracted.extend(spec_records)
+            except Exception as ex:
+                logger.debug("Failed extracting from %s: %s", spec_file, ex)
 
     # 2. Build EvidenceBundle with both extracted records and retrieved context
     retrieved_items = state.get("retrieved_context", [])
@@ -186,6 +244,8 @@ async def evidence_build_node(state: AgentState) -> Dict[str, Any]:
         ],
         "grounding_coverage_score": bundle.coverage_score,
         "provenance_completeness": bundle.provenance_complete,
+        "source_manifests": [m.model_dump() for m in native_manifests] + list(state.get("source_manifests", [])),
+        "source_chunks": [c.model_dump() for c in native_chunks] + list(state.get("source_chunks", [])),
         "trace": trace,
     }
 
@@ -244,6 +304,7 @@ async def claim_bind_node(state: AgentState) -> Dict[str, Any]:
         "claims_count": len(result.bindings),
         "grounded_claim_rate": result.grounded_claim_rate,
         "citation_accuracy": result.citation_accuracy,
+        "citation_coverage": getattr(result, "citation_coverage", 1.0),
         "unsupported_count": len(result.unsupported_claims),
         "unknown_count": len(result.unknown_claims),
     })
@@ -253,10 +314,12 @@ async def claim_bind_node(state: AgentState) -> Dict[str, Any]:
         "grounding_manifest": result.grounding_manifest,
         "grounded_claim_rate": result.grounded_claim_rate,
         "citation_accuracy": result.citation_accuracy,
+        "citation_coverage": getattr(result, "citation_coverage", 1.0),
         "unsupported_claims": [b.model_dump() for b in result.unsupported_claims],
         "unknown_claims": [b.model_dump() for b in result.unknown_claims],
         "trace": trace,
     }
+
 
 
 async def repair_grounding_node(state: AgentState) -> Dict[str, Any]:

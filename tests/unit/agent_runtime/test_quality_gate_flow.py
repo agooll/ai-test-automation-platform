@@ -57,6 +57,7 @@ async def test_clean_test_produces_pass(tmp_path: Path):
     def clean_generator(state: AgentState):
         return {
             "tests/test_real.py": """
+# @cite EV-CACHE-LRU
 from cachetools import LRUCache
 
 def test_cache_put():
@@ -86,9 +87,14 @@ def test_cache_put():
             "source_id": "s1",
             "source_path": "cachetools.py",
             "source_chunk_id": "c1",
+            "line_start": 1,
+            "line_end": 10,
+            "commit_sha": "4500e3d04288738d25acbb4973eb3c3e1bf41db9",
+            "content_hash": "h_cache_lru",
             "trust_level": "T0_AUTHORITATIVE",
         }
     ]
+
     result = await workflow.run({
         "requirement": "Test LRU cache",
         "workspace": str(tmp_path),
@@ -196,10 +202,18 @@ async def test_adapter_evidence_leads_codegate_to_supported_and_pass(tmp_path: P
         llm_manager=MagicMock(),
     )
 
-    # 3. Define generator that generates a test exercising the verified endpoint
+    src_dir = tmp_path / "src" / "api"
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "users.py").write_text(
+        "@app.get('/api/v1/users')\ndef list_users(): return []\n",
+        encoding="utf-8",
+    )
+
+    # 3. Define generator that generates a test exercising the verified endpoint with citation
     def api_generator(state: AgentState):
         return {
             "tests/test_users_api.py": """
+# @cite EP-USERS-001
 import requests
 
 def test_list_users():
@@ -224,6 +238,7 @@ def test_list_users():
         "requirement": "Test user listing",
         "workspace": str(tmp_path),
         "target_entrypoint": "src.api.users",
+        "pinned_commit": "0842b24",
     })
 
     # 4. Assert end-to-end evidence propagation and grounding verification
@@ -244,6 +259,8 @@ def test_list_users():
     assert cq_res["status"] == "PASS"
     assert cq_res["allow_final_pass"] is True
     assert result["final_verdict"] == "PASS"
+
+
 
 
 @pytest.mark.asyncio
@@ -515,6 +532,7 @@ async def test_workflow_passes_when_all_three_gates_pass(tmp_path: Path):
     def clean_generator(state: AgentState):
         return {
             "tests/test_clean.py": """
+# @cite EV-CACHE-LRU
 from cachetools import LRUCache
 
 def test_cache_op():
@@ -555,6 +573,10 @@ def test_cache_op():
             "source_id": "s1",
             "source_path": "cachetools.py",
             "source_chunk_id": "c1",
+            "line_start": 1,
+            "line_end": 10,
+            "commit_sha": "4500e3d04288738d25acbb4973eb3c3e1bf41db9",
+            "content_hash": "h_cache_lru",
             "trust_level": "T0_AUTHORITATIVE",
         }
     ]

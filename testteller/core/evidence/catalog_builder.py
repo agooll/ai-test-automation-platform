@@ -15,9 +15,15 @@ logger = logging.getLogger(__name__)
 class EvidenceCatalogBuilder:
     """Builds canonical EvidenceBundle from retrieved chunks, extracted facts, and OpenAPI specs."""
 
-    def __init__(self, pinned_commit: Optional[str] = None):
+    def __init__(
+        self,
+        pinned_commit: Optional[str] = None,
+        resolver: Optional[ConflictResolver] = None,
+        conflict_resolver: Optional[ConflictResolver] = None,
+    ):
         self.pinned_commit = pinned_commit
-        self.resolver = ConflictResolver(pinned_commit=pinned_commit)
+        self.resolver = resolver or conflict_resolver or ConflictResolver(pinned_commit=pinned_commit)
+
 
     def build_bundle(
         self,
@@ -46,24 +52,47 @@ class EvidenceCatalogBuilder:
                     meta = item.get("metadata", {})
                     src_path = item.get("source_path") or item.get("source") or meta.get("source_path") or meta.get("source", "")
 
-                    raw_trust = item.get("trust_level") or meta.get("trust_level")
-                    if raw_trust:
-                        try:
-                            trust = TrustLevel(raw_trust)
-                        except Exception:
-                            trust = TrustLevel.T3_WEAK
-                    elif src_path and not src_path.startswith("discovered:") and src_path != "unknown":
-                        trust = TrustLevel.T1_STRONG
-                    else:
-                        trust = TrustLevel.T3_WEAK
-
                     src_id = item.get("source_id") or meta.get("source_id", "")
                     src_chunk = item.get("source_chunk_id") or item.get("chunk_id") or meta.get("chunk_id", "")
                     line_s = item.get("line_start") if item.get("line_start") is not None else meta.get("line_start")
                     line_e = item.get("line_end") if item.get("line_end") is not None else meta.get("line_end")
-                    commit = item.get("commit_sha") or meta.get("commit_sha") or self.pinned_commit
+                    commit = item.get("commit_sha") or meta.get("commit_sha") or ""
                     c_hash = item.get("content_hash") or meta.get("content_hash", "")
                     extractor = item.get("extractor") or meta.get("extractor", "knowledge_extractor")
+
+                    has_canonical_prov = bool(
+                        commit
+                        and c_hash
+                        and (line_s is not None and line_s > 0)
+                        and (src_chunk and src_chunk != "chk_unknown")
+                        and src_id
+                        and src_path
+                        and not src_path.startswith("discovered:")
+                        and src_path != "unknown"
+                    )
+
+                    raw_trust = item.get("trust_level") or meta.get("trust_level")
+                    parsed_trust = None
+                    if raw_trust:
+                        try:
+                            parsed_trust = raw_trust if isinstance(raw_trust, TrustLevel) else TrustLevel(raw_trust)
+                        except Exception:
+                            parsed_trust = None
+
+                    # Strict T1 promotion rule: Only items with canonical provenance can be T0/T1
+                    if has_canonical_prov:
+                        if parsed_trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG):
+                            trust = parsed_trust
+                        else:
+                            trust = parsed_trust or TrustLevel.T1_STRONG
+                    else:
+                        if parsed_trust in (TrustLevel.T0_AUTHORITATIVE, TrustLevel.T1_STRONG):
+                            trust = TrustLevel.T2_SUPPORTING
+                        else:
+                            trust = parsed_trust or (
+                                TrustLevel.T3_WEAK if (not src_path or src_path.startswith("discovered:")) else TrustLevel.T2_SUPPORTING
+                            )
+
 
                     all_records.append(
                         EvidenceRecord(
@@ -98,8 +127,8 @@ class EvidenceCatalogBuilder:
                     content = getattr(item, "content", "")
                     match_rules = getattr(item, "match_rules", [])
 
-                source_id = meta.get("source_id") or f"src_{src}"
-                commit_sha = meta.get("commit_sha") or self.pinned_commit
+                source_id = meta.get("source_id") or ""
+                commit_sha = meta.get("commit_sha") or ""
                 content_hash = meta.get("content_hash") or ""
                 doc_type = meta.get("type", "code")
 
@@ -130,28 +159,16 @@ class EvidenceCatalogBuilder:
         retained_records, conflicts = self.resolver.detect_and_resolve(all_records)
 
         # 4. Provenance completeness check: commit/hash/line/chunk/source full chain
+        # ZERO SYNTHESIS: If metadata lacks commit, chunk, hash, line, or source -> provenance incomplete
         if not retained_records:
             provenance_complete = False
         else:
             provenance_complete = True
             for r in retained_records:
-                if not r.commit_sha and self.pinned_commit:
-                    r.commit_sha = self.pinned_commit
-                if r.source_path and not r.source_path.startswith("discovered:") and r.source_path != "unknown":
-                    if not r.source_id:
-                        r.source_id = f"src_{r.source_path}"
-                    if r.line_start is None:
-                        r.line_start = 1
-                    if not r.content_hash:
-                        import hashlib
-                        r.content_hash = hashlib.sha256(r.value.encode("utf-8")).hexdigest()[:16]
-                    if not r.source_chunk_id:
-                        r.source_chunk_id = f"chk_{r.source_id}_{r.line_start}"
-
                 has_commit = bool(r.commit_sha and str(r.commit_sha).strip())
                 has_hash = bool(r.content_hash and str(r.content_hash).strip())
                 has_line = r.line_start is not None and r.line_start > 0
-                has_chunk = bool(r.source_chunk_id and str(r.source_chunk_id).strip())
+                has_chunk = bool(r.source_chunk_id and str(r.source_chunk_id).strip() and r.source_chunk_id != "chk_unknown")
                 has_source = bool(
                     r.source_id
                     and r.source_path
@@ -163,6 +180,7 @@ class EvidenceCatalogBuilder:
                 if not (has_commit and has_hash and has_line and has_chunk and has_source):
                     provenance_complete = False
                     break
+
 
         # 5. Calculate coverage against query plan (supports GroundingQueryPlan or dict, no fake 1.0)
         coverage_score = 0.0

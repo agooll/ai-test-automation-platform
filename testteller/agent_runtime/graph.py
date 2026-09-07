@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import inspect
 import logging
 import re
+
 import time
 import uuid
 from typing import Any, Awaitable, Callable, Literal
@@ -31,9 +33,15 @@ from ..quality_gate.code_models import CodeQualityGateResult
 from ..quality_gate.claim_binding import ClaimEvidenceBinding
 from ..core.evidence.catalog import EvidenceCatalog2
 from ..core.evidence.catalog_builder import EvidenceCatalogBuilder
+from ..core.evidence.ids import compute_content_hash
 from ..core.evidence.models import EvidenceRecord, SourceChunk, SourceManifest
 from ..core.evidence.repository import EvidenceRepository
-from ..automator_agent.repair_planner import RepairChange, RepairGroundingPlanner, RepairPlan
+from ..automator_agent.repair_planner import (
+    ASTExpectationExtractor,
+    RepairChange,
+    RepairGroundingPlanner,
+    RepairPlan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -443,8 +451,35 @@ class AgenticTestWorkflow:
         state_with_plan = {**state, "repair_plan": validated_plan.model_dump()}
         repaired_files = await _maybe_call(self.repairer, state_with_plan)
 
+        # 5. Semantic Diff & Expectation Validation on proposed repaired files BEFORE writing to disk (AST Fingerprinting)
+        unbacked_expectation_changes = []
+        for name, proposed_code in (repaired_files or {}).items():
+            before_code = before_files.get(name, "")
+            if not before_code or before_code == proposed_code:
+                continue
+            unbacked_expectation_changes.extend(
+                ASTExpectationExtractor.find_unbacked_expectation_changes(
+                    before_code=before_code,
+                    proposed_code=proposed_code,
+                    catalog_records=catalog_records,
+                )
+            )
+
+        if unbacked_expectation_changes:
+            round_num = state.get("repair_round", 0) + 1
+            reason = f"Rejected proposed repair: Expectation changes not backed by authoritative evidence: {'; '.join(unbacked_expectation_changes)}"
+            logger.warning(reason)
+            update: AgentState = {
+                "repair_round": round_num,
+                "repair_rejected": True,
+                "weakening_detected": True,
+                "error": reason,
+            }
+            return self._record(state, "repair", update)
+
         write_result = await self.tools.invoke("write_files", workspace=ws, files=repaired_files)
         round_num = state.get("repair_round", 0) + 1
+
 
         files_diff = {}
         all_names = set(before_files.keys()) | set(repaired_files.keys())
@@ -496,7 +531,7 @@ class AgenticTestWorkflow:
         exec_passed = bool(execution.get("passed", False))
         cq_res = state.get("code_quality_result", {})
         cq_status = cq_res.get("status", "PASS")
-        rev_status = review.get("status", "uncertain")
+        rev_status = review.get("status", "pass" if self.reviewer is None else "uncertain")
 
         # Stage 5 Hard Invariant: final PASS requires:
         # 1. Execution PASS
@@ -544,6 +579,11 @@ class AgenticTestWorkflow:
         weakening_detected = state.get("weakening_detected", False)
         repair_rejected = state.get("repair_rejected", False)
 
+        cite_acc = state.get("citation_accuracy")
+        citation_accuracy = float(cite_acc) if cite_acc is not None else 1.0
+        cite_cov = state.get("citation_coverage")
+        citation_coverage = float(cite_cov) if cite_cov is not None else 1.0
+
         if not exec_passed:
             exit_code = execution.get("exit_code")
             verdict = "REJECTED" if exit_code not in (0, None) else "NEEDS_REVIEW"
@@ -556,8 +596,11 @@ class AgenticTestWorkflow:
             or coverage_score < 0.80
             or not provenance_complete
             or grounded_claim_rate < 0.95
+            or citation_accuracy < 0.95
+            or citation_coverage < 0.95
         ):
             verdict = "NEEDS_REVIEW"
+
         elif rev_status == "uncertain":
             verdict = "NEEDS_REVIEW"
         else:
@@ -602,6 +645,50 @@ class AgenticTestWorkflow:
         if db_path:
             try:
                 repo = EvidenceRepository(db_path)
+                target_repo = state.get("target_repo") or state.get("repo_path") or state.get("workspace") or ""
+                repo_dir = Path(target_repo) if target_repo else None
+
+                # 1. Persist verified native SourceManifests (sources) with real hash integrity check
+                saved_source_ids: set[str] = set()
+                for m_item in state.get("source_manifests", []):
+                    try:
+                        manifest = m_item if isinstance(m_item, SourceManifest) else SourceManifest(**m_item)
+                        if repo_dir and manifest.path:
+                            cand_path = repo_dir / manifest.path
+                            if not cand_path.is_file() and Path(manifest.path).is_file():
+                                cand_path = Path(manifest.path)
+                            if cand_path.is_file():
+                                actual_text = cand_path.read_text(encoding="utf-8", errors="replace")
+                                actual_hash = compute_content_hash(actual_text)
+                                if manifest.content_hash and actual_hash != manifest.content_hash:
+                                    logger.error(
+                                        "Hash integrity check FAILED for %s: expected %s, got %s",
+                                        manifest.path, manifest.content_hash, actual_hash
+                                    )
+                                    continue
+                        repo.save_manifest(manifest)
+                        saved_source_ids.add(manifest.source_id)
+                    except Exception as ex:
+                        logger.warning("Failed to persist source manifest: %s", ex)
+
+                # 2. Persist verified native SourceChunks (chunks) with real content hash check
+                saved_chunk_ids: set[str] = set()
+                for c_item in state.get("source_chunks", []):
+                    try:
+                        chunk = c_item if isinstance(c_item, SourceChunk) else SourceChunk(**c_item)
+                        computed_chunk_hash = compute_content_hash(chunk.text)
+                        if chunk.content_hash and computed_chunk_hash != chunk.content_hash:
+                            logger.error(
+                                "Chunk hash integrity check FAILED for %s: expected %s, got %s",
+                                chunk.chunk_id, chunk.content_hash, computed_chunk_hash
+                            )
+                            continue
+                        repo.save_chunk(chunk)
+                        saved_chunk_ids.add(chunk.chunk_id)
+                    except Exception as ex:
+                        logger.warning("Failed to persist source chunk: %s", ex)
+
+                # 3. Persist EvidenceRecord (evidence)
                 for ev in state.get("evidence_catalog", []):
                     record: Optional[EvidenceRecord] = None
                     if isinstance(ev, EvidenceRecord):
@@ -615,32 +702,42 @@ class AgenticTestWorkflow:
                             pass
 
                     if record:
-                        # 1. Persist SourceManifest (source)
-                        manifest = SourceManifest(
-                            source_id=record.source_id,
-                            repository=record.repo_url,
-                            commit_sha=record.commit_sha,
-                            path=record.source_path,
-                            file_type=Path(record.source_path).suffix.lstrip(".") if record.source_path else "code",
-                            content_hash=record.content_hash,
-                        )
-                        repo.save_manifest(manifest)
+                        if record.source_id not in saved_source_ids:
+                            content_hash = record.content_hash or ""
+                            if repo_dir and record.source_path:
+                                cand_p = repo_dir / record.source_path
+                                if not cand_p.is_file() and Path(record.source_path).is_file():
+                                    cand_p = Path(record.source_path)
+                                if cand_p.is_file():
+                                    content_hash = compute_content_hash(cand_p.read_text(encoding="utf-8", errors="replace"))
+                            m = SourceManifest(
+                                source_id=record.source_id,
+                                repository=record.repo_url or (str(repo_dir) if repo_dir else None),
+                                commit_sha=record.commit_sha,
+                                path=record.source_path or "unknown",
+                                file_type=Path(record.source_path).suffix.lstrip(".") if record.source_path else "code",
+                                content_hash=content_hash or "unverified",
+                            )
+                            repo.save_manifest(m)
+                            saved_source_ids.add(record.source_id)
 
-                        # 2. Persist SourceChunk (chunk)
-                        chunk = SourceChunk(
-                            chunk_id=record.source_chunk_id,
-                            source_id=record.source_id,
-                            text=record.value,
-                            line_start=record.line_start or 1,
-                            line_end=record.line_end or (record.line_start or 1),
-                            content_hash=record.content_hash,
-                        )
-                        repo.save_chunk(chunk)
+                        if record.source_chunk_id not in saved_chunk_ids:
+                            chunk_text = record.metadata.get("chunk_text") or record.metadata.get("content") or record.value
+                            c_hash = record.content_hash or compute_content_hash(chunk_text)
+                            chk = SourceChunk(
+                                chunk_id=record.source_chunk_id,
+                                source_id=record.source_id,
+                                text=chunk_text,
+                                line_start=record.line_start or 1,
+                                line_end=record.line_end or (record.line_start or 1),
+                                content_hash=c_hash,
+                            )
+                            repo.save_chunk(chk)
+                            saved_chunk_ids.add(record.source_chunk_id)
 
-                        # 3. Persist EvidenceRecord (evidence)
                         repo.save_evidence_record(record)
 
-                # 4. Persist ClaimEvidenceBinding (claim & claim_evidence_links)
+                # 4. Persist ClaimEvidenceBinding (claims & claim_evidence_links)
                 for cb in state.get("claim_bindings", []):
                     if isinstance(cb, ClaimEvidenceBinding):
                         repo.save_claim_binding(cb)
