@@ -156,10 +156,15 @@ class BenchmarkRunner:
 
                 test_cmd = ["pytest", "-v", "tests"] if manifest.test_framework == "pytest" else ["npm", "test"]
 
+                target_repo_path = str(self.project_manager.resolve_project_source(manifest))
+
                 state: dict[str, Any] = {
                     "task_id": f"{case.case_id}_run{run_index}",
                     "workspace": str(work_dir),
                     "workspace_dir": str(work_dir),
+                    "target_repo": target_repo_path,
+                    "repo_path": target_repo_path,
+                    "pinned_commit": manifest.commit_sha,
                     "language": manifest.language,
                     "framework": manifest.test_framework,
                     "test_framework": manifest.test_framework,

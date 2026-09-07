@@ -132,6 +132,17 @@ class EvidenceCatalogBuilder:
                 content_hash = meta.get("content_hash") or ""
                 doc_type = meta.get("type", "code")
 
+                has_retrieval_canonical_prov = bool(
+                    commit_sha
+                    and content_hash
+                    and (meta.get("line_start") is not None and meta.get("line_start") > 0)
+                    and (chunk_id and chunk_id != "chk_unknown")
+                    and source_id
+                    and src
+                    and not src.startswith("discovered:")
+                    and src != "unknown"
+                )
+
                 # If retrieved item has exact match rules (e.g. symbol:Foo or api_key:GET /users)
                 for rule in match_rules:
                     if ":" in rule:
@@ -139,6 +150,7 @@ class EvidenceCatalogBuilder:
                         kind = "target_symbol" if "symbol" in rule_type else (
                             "api_endpoint" if "api" in rule_type else "config"
                         )
+                        trust = TrustLevel.T1_STRONG if (doc_type == "code" and has_retrieval_canonical_prov) else TrustLevel.T2_SUPPORTING
                         ev = EvidenceRecord(
                             evidence_id=f"evi_{kind}_{chunk_id[-8:] if len(chunk_id)>=8 else chunk_id}",
                             kind=kind,
@@ -151,7 +163,7 @@ class EvidenceCatalogBuilder:
                             commit_sha=commit_sha,
                             content_hash=content_hash,
                             extractor="hybrid_retriever",
-                            trust_level=TrustLevel.T1_STRONG if doc_type == "code" else TrustLevel.T2_SUPPORTING,
+                            trust_level=trust,
                         )
                         all_records.append(ev)
 

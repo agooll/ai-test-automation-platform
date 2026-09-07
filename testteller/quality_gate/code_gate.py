@@ -28,6 +28,8 @@ from .grounding import (
 )
 from .python_analyzer import analyze_test_module
 from .weakening_detector import RepairWeakeningDetector
+from testteller.core.evidence.catalog import EvidenceCatalog2
+from testteller.core.evidence.models import EvidenceRecord
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,7 @@ class AutomationCodeQualityGate:
         target_entrypoint: Optional[str] = None,
         retrieved_context: Optional[List[Any]] = None,
         use_ai: bool = False,
-        evidence_catalog: Optional[EvidenceCatalog] = None,
+        evidence_catalog: Optional[Any] = None,
         repo_path: Optional[str] = None,
         previous_files: Optional[Dict[str, str]] = None,
         baseline_files: Optional[Dict[str, str]] = None,
@@ -79,17 +81,34 @@ class AutomationCodeQualityGate:
                 repair_feedback=["No test files were generated."],
             )
 
-        # 0. Build or enrich EvidenceCatalog
-        if isinstance(evidence_catalog, EvidenceCatalog):
+        # 0. Build or enrich EvidenceCatalog (supporting Stage 5 EvidenceCatalog2 and EvidenceRecord)
+        cat2: Optional[EvidenceCatalog2] = None
+        if isinstance(evidence_catalog, EvidenceCatalog2):
+            cat2 = evidence_catalog
+            catalog = cat2.to_legacy_catalog()
+        elif isinstance(evidence_catalog, EvidenceCatalog):
             catalog = evidence_catalog
+            cat2 = EvidenceCatalog2.from_legacy_catalog(catalog)
         else:
             catalog = EvidenceCatalog()
+            cat2 = EvidenceCatalog2()
             if isinstance(evidence_catalog, (list, tuple)):
                 for it in evidence_catalog:
-                    if isinstance(it, EvidenceItem):
+                    if isinstance(it, EvidenceRecord):
+                        cat2.add_record(it)
+                        catalog.add_item(it.to_legacy_evidence_item())
+                    elif isinstance(it, EvidenceItem):
                         catalog.add_item(it)
                     elif isinstance(it, dict) and "evidence_id" in it and "kind" in it and "value" in it:
                         try:
+                            if "source_id" in it or "trust_level" in it:
+                                try:
+                                    rec = EvidenceRecord(**it)
+                                    cat2.add_record(rec)
+                                    catalog.add_item(rec.to_legacy_evidence_item())
+                                    continue
+                                except Exception:
+                                    pass
                             catalog.add_item(
                                 EvidenceItem(
                                     evidence_id=str(it["evidence_id"]),
@@ -111,7 +130,10 @@ class AutomationCodeQualityGate:
 
         if retrieved_context:
             for ctx_item in retrieved_context:
-                if isinstance(ctx_item, EvidenceItem):
+                if isinstance(ctx_item, EvidenceRecord):
+                    catalog.add_item(ctx_item.to_legacy_evidence_item())
+                    cat2.add_record(ctx_item)
+                elif isinstance(ctx_item, EvidenceItem):
                     catalog.add_item(ctx_item)
                 elif isinstance(ctx_item, dict):
                     if "evidence_id" in ctx_item and "kind" in ctx_item and "value" in ctx_item:

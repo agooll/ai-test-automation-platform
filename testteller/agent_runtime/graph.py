@@ -299,7 +299,7 @@ class AgenticTestWorkflow:
         target = state.get("target_entrypoint")
         context = state.get("retrieved_context", [])
         ws = state.get("workspace") or state.get("workspace_dir") or state.get("repo_path")
-        catalog = state.get("grounding_catalog")
+        catalog = state.get("evidence_catalog") or state.get("grounding_catalog")
 
         gate_res: CodeQualityGateResult = await self.code_quality_gate.evaluate(
             generated_files=files,

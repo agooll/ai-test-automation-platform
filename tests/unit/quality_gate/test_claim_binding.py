@@ -290,3 +290,146 @@ def test_claim_binding_t2_t3_cannot_support_factual_claim():
     assert any("T3_WEAK" in v.message for v in res.violations)
 
 
+@pytest.mark.unit
+def test_citation_coverage_empty_citations_yields_zero():
+    """Empty claimed_citations list [] with claims must yield citation_coverage == 0.0, never 100%."""
+    catalog = EvidenceCatalog2()
+    ev = EvidenceRecord(
+        evidence_id="EV-API-01",
+        kind="api_endpoint",
+        value="GET /api/v1/users",
+        source_id="src_api",
+        source_path="api/users.py",
+        source_chunk_id="chk_api",
+        commit_sha="0842b24",
+        content_hash="h_api",
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+    catalog.add_record(ev)
+
+    claims = [
+        ClaimItem(
+            claim_id="C-001",
+            kind="api_endpoint",
+            value="GET /api/v1/users",
+            file_path="tests/test_users.py",
+            line_number=10,
+        )
+    ]
+
+    res = ClaimEvidenceBinder.bind(
+        claims=claims,
+        catalog=catalog,
+        claimed_citations=[],  # Explicit empty citations
+    )
+    assert res.citation_coverage == 0.0
+    assert res.citation_accuracy == 0.0
+
+
+@pytest.mark.unit
+def test_citation_coverage_partial_ratio():
+    """Citation coverage accurately reflects ratio of claims with valid authoritative citations."""
+    catalog = EvidenceCatalog2()
+    ev1 = EvidenceRecord(
+        evidence_id="EV-1",
+        kind="api_endpoint",
+        value="GET /api/v1/a",
+        source_id="s1",
+        source_path="a.py",
+        source_chunk_id="c1",
+        commit_sha="0842b24",
+        content_hash="h1",
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+    ev2 = EvidenceRecord(
+        evidence_id="EV-2",
+        kind="api_endpoint",
+        value="GET /api/v1/b",
+        source_id="s2",
+        source_path="b.py",
+        source_chunk_id="c2",
+        commit_sha="0842b24",
+        content_hash="h2",
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+    catalog.add_record(ev1)
+    catalog.add_record(ev2)
+
+    claims = [
+        ClaimItem(claim_id="C-1", kind="api_endpoint", value="GET /api/v1/a", file_path="t.py", line_number=1),
+        ClaimItem(claim_id="C-2", kind="api_endpoint", value="GET /api/v1/b", file_path="t.py", line_number=5),
+    ]
+
+    # Only EV-1 cited
+    res = ClaimEvidenceBinder.bind(
+        claims=claims,
+        catalog=catalog,
+        claimed_citations=["EV-1"],
+    )
+    assert res.citation_coverage == 0.5
+    assert res.citation_accuracy == 1.0
+
+
+@pytest.mark.unit
+def test_citation_coverage_invalid_or_weak_citations_ignored():
+    """Citations citing non-existent or weak T2/T3 evidence do not count toward coverage."""
+    catalog = EvidenceCatalog2()
+    ev_weak = EvidenceRecord(
+        evidence_id="EV-WEAK",
+        kind="api_endpoint",
+        value="GET /api/v1/weak",
+        source_id="sw",
+        source_path="doc.md",
+        source_chunk_id="cw",
+        extractor="doc_extractor",
+        trust_level=TrustLevel.T2_SUPPORTING,
+    )
+    catalog.add_record(ev_weak)
+
+    claims = [
+        ClaimItem(claim_id="C-1", kind="api_endpoint", value="GET /api/v1/weak", file_path="t.py", line_number=1),
+    ]
+
+    res = ClaimEvidenceBinder.bind(
+        claims=claims,
+        catalog=catalog,
+        claimed_citations=["EV-WEAK", "EV-NONEXISTENT"],
+    )
+    assert res.citation_coverage == 0.0
+    assert res.citation_accuracy == 0.0
+
+
+@pytest.mark.unit
+def test_citation_coverage_none_citations_unannotated():
+    """When claimed_citations is None (unannotated test code), citation_coverage is default 1.0."""
+    catalog = EvidenceCatalog2()
+    ev = EvidenceRecord(
+        evidence_id="EV-1",
+        kind="api_endpoint",
+        value="GET /api/v1/test",
+        source_id="s1",
+        source_path="test.py",
+        source_chunk_id="c1",
+        commit_sha="0842b24",
+        content_hash="h1",
+        extractor="ast_extractor",
+        trust_level=TrustLevel.T0_AUTHORITATIVE,
+    )
+    catalog.add_record(ev)
+
+    claims = [
+        ClaimItem(claim_id="C-1", kind="api_endpoint", value="GET /api/v1/test", file_path="t.py", line_number=1),
+    ]
+
+    res = ClaimEvidenceBinder.bind(
+        claims=claims,
+        catalog=catalog,
+        claimed_citations=None,  # Unannotated
+    )
+    assert res.citation_coverage == 1.0
+    assert res.citation_accuracy == 1.0
+
+
